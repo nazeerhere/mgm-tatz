@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 180" preserveAspectRatio="none">
+  <defs>
+    <filter id="eroded-contour" x="-4%" y="-30%" width="108%" height="160%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency=".004 .075" numOctaves="4" seed="47" result="edge-noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="edge-noise" scale="34" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+  </defs>
+
+  <path
+    fill="white"
+    filter="url(#eroded-contour)"
+    d="M0 128C73 119 126 132 195 118 271 103 323 119 389 106 463 91 524 113 598 100 670 87 724 113 797 96 873 78 928 105 1004 91 1087 76 1142 104 1221 86 1304 67 1360 96 1435 83 1517 69 1572 87 1648 72 1711 60 1762 68 1800 59V180H0Z"
+  />
+
+  <rect x="0" y="158" width="1800" height="22" fill="white"/>
+</svg>

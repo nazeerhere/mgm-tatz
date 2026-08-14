@@ -1,0 +1,36 @@
+# dependencies and framework output
+/node_modules
+/.next
+/out
+/build
+/coverage
+/.vercel
+
+# local configuration and secrets
+.env*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+
+# browser and test captures
+/screenshots
+/browser-captures
+/test-results
+/playwright-report
+/.artifacts
+*-screenshot.png
+screenshot-*.png
+
+# generated, temporary, and local files
+*.tsbuildinfo
+*.log
+*.pid
+*.tmp
+*.temp
+/.cache
+/.tmp
+/tmp
+.DS_Store
+*.swp
