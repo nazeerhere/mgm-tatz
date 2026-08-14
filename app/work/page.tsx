@@ -11,9 +11,13 @@ export default async function WorkPage() {
   const { items, configured } = await getPublishedPortfolioItems();
   return (
     <section className="section dark work-index">
-      <p className="kicker">Portfolio</p>
-      <h1>Selected work.</h1>
-      <p className="lede">Finished tattoos, drawings, flash, and concepts.</p>
+      <header className="work-index-header">
+        <p className="kicker">MGM.TATZ portfolio</p>
+        <h1>Tattoo work.</h1>
+        <p className="lede">
+          A focused selection of finished tattoo work and illustrative studies.
+        </p>
+      </header>
       {configured && items.length ? (
         <Gallery items={items} headingLevel="h2" />
       ) : (

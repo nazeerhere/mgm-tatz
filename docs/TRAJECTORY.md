@@ -1,5 +1,29 @@
 # Client Website A — Trajectory
 
+## 2026-08-14 — Public tattoo portfolio refinement
+
+**Objective**
+
+Make `/work` the primary public tattoo portfolio page without changing the verified Supabase publishing path or adding adjacent product features.
+
+**Changes**
+
+- Replaced the fixed crop-card presentation with a responsive editorial grid that keeps each image's natural aspect ratio and introduces only a restrained stagger at larger widths.
+- Added a focused native-dialog view with `contain` media, title, category, optional description, Escape/backdrop close, and an explicit “Back to gallery” control.
+- Unified live and development-fallback display through one presentation component while leaving the server-side published-only query and live-data precedence unchanged.
+- Removed body placement and availability labels from the public cards; no filter, search, pagination, engagement, newsletter, booking, or admin feature was added.
+
+**Verification**
+
+- The configured `/work` route returned 200 and rendered two live Supabase items with no development fallback marker.
+- An anonymous live REST query returned two published rows and zero draft rows under RLS.
+- Desktop and exact 375px browser checks confirmed two-column live layout, single-column mobile layout, preserved aspect ratios, no horizontal overflow, 52px mobile view targets, focused `contain` media, and successful Escape and explicit-button close paths.
+- Formatting, zero-warning ESLint, strict TypeScript, all 7 tests, and production build pass.
+
+**Drift check**
+
+No authentication, RLS, Storage policy, upload/publish action, database schema, admin route, public query, dependency, or external resource changed.
+
 ## 2026-08-13 — Live Supabase publishing checkpoint
 
 **Objective**

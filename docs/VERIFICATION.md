@@ -1,5 +1,15 @@
 # Client Website A — Verification Contract
 
+## Public portfolio gallery refinement — 2026-08-14
+
+- Configured production `/work` returned HTTP 200, rendered `classic` and `dove`, and contained no development-fallback marker.
+- A read-only anonymous REST check against the development project returned HTTP 200 with two published rows and HTTP 200 with zero rows for `published = false`, confirming draft rows remain absent under the live public RLS boundary.
+- Automated browser interaction at 1440×1000 confirmed a two-column live grid, natural index image treatment, no page overflow, focused-view `object-fit: contain`, scroll locking, Escape close, and explicit “Back to gallery” close.
+- The exact 375×812 CSS viewport rendered one 343px gallery column with no horizontal overflow and 52px visible view targets. Index and focused-view screenshots were inspected.
+- The existing development fallback still maps all local tattoo fixtures through the same presentation component and remains subordinate to configured live rows.
+- `npm exec prettier -- --write` on changed files, `npm run format:check`, `npm run lint`, `npm run typecheck`, `npm test` (7/7), and `npm run build` pass.
+- The failed first direct SDK probe made no data mutation: Node 20 lacks the native WebSocket transport expected by that client path. The successful follow-up used read-only anonymous REST and required no dependency or configuration change.
+
 ## Live development Supabase publishing — 2026-08-13
 
 **User-observed live evidence**

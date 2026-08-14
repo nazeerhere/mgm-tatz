@@ -1,4 +1,7 @@
-import Image from "next/image";
+import {
+  PortfolioGallery,
+  type PortfolioGalleryItem,
+} from "@/components/portfolio-gallery";
 import { getSupabaseEnvironment } from "@/lib/env";
 import { publicMediaUrl, type PublishedPortfolioItem } from "@/lib/portfolio";
 
@@ -9,7 +12,6 @@ export function Gallery({
   items: PublishedPortfolioItem[];
   headingLevel?: "h2" | "h3";
 }) {
-  const Heading = headingLevel;
   if (!items.length)
     return (
       <p className="empty-state">
@@ -17,38 +19,22 @@ export function Gallery({
       </p>
     );
   const { url } = getSupabaseEnvironment();
-  return (
-    <div className="gallery editorial-gallery">
-      {items.map((item) => {
-        const media = item.portfolio_media[0];
-        if (!media) return null;
-        return (
-          <article className="work-card" key={item.id}>
-            <div className="image-frame">
-              <Image
-                src={publicMediaUrl(
-                  url,
-                  media.storage_bucket,
-                  media.storage_key,
-                )}
-                alt={media.alt_text}
-                width={media.width ?? 1200}
-                height={media.height ?? 1500}
-                sizes="(max-width: 720px) 100vw, 50vw"
-              />
-            </div>
-            <div className="work-meta">
-              <p>
-                {item.type}
-                {item.body_placement ? ` · ${item.body_placement}` : ""}
-              </p>
-              <Heading>{item.title}</Heading>
-              <p>{item.description}</p>
-              {item.available ? <span>Available concept</span> : null}
-            </div>
-          </article>
-        );
-      })}
-    </div>
-  );
+  const galleryItems = items.flatMap<PortfolioGalleryItem>((item) => {
+    const media = item.portfolio_media[0];
+    if (!media) return [];
+    return [
+      {
+        id: item.id,
+        src: publicMediaUrl(url, media.storage_bucket, media.storage_key),
+        alt: media.alt_text,
+        width: media.width ?? 1200,
+        height: media.height ?? 1500,
+        title: item.title,
+        category: item.type,
+        description: item.description.trim() || undefined,
+      },
+    ];
+  });
+
+  return <PortfolioGallery items={galleryItems} headingLevel={headingLevel} />;
 }

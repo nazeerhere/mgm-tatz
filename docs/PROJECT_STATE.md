@@ -1,6 +1,6 @@
 # Client Website A — Project State
 
-_Last updated: 2026-08-13 for live development Supabase publishing verification._
+_Last updated: 2026-08-14 for the public portfolio gallery refinement._
 
 ## Project header
 
@@ -22,6 +22,7 @@ _Last updated: 2026-08-13 for live development Supabase publishing verification.
 - Public `/` and `/work` routes render the approved black/ivory/gold editorial foundation and explicit placeholders where client content is unavailable.
 - Home uses a dark Miles-led hero with a three-image finished-tattoo rail, followed by an ivory drawings rail, dark split About section, ivory specialties, dark FAQ/contact band, ivory four-step process, and dark consultation/footer close.
 - The standalone homepage Selected Work section is intentionally removed. The full Selected Work gallery remains available at `/work`.
+- `/work` is the primary public tattoo portfolio page. It uses a responsive editorial grid with natural image proportions, restrained title/category/optional-description metadata, and an accessible native-dialog focused view with Escape, backdrop, and explicit back controls.
 - Navigation is CSS-sticky with a compact translucent charcoal surface and responsive anchor offsets.
 - Dark-to-ivory boundaries use a subtractive paper-colored pseudo-element masked by a non-repeating SVG charcoal-erosion texture. The mask erodes only the dark section's lower band; detached flecks and the dark light-section seam have been removed.
 - `/admin/login`, `/admin`, and `/admin/portfolio/new` implement password login, owner-only access, draft creation, image validation, and explicit publishing.
@@ -44,6 +45,8 @@ _Last updated: 2026-08-13 for live development Supabase publishing verification.
 - The approved-reference scale pass reduces headline, media, navigation, CTA, and section dimensions while retaining the existing hierarchy. Responsive grids return to one column below 900px, with compact two-column drawing/specialty content at phone widths.
 - Nazeer reported a successful live end-to-end check against the development Supabase project: password owner login, image upload, private draft save, confirmation that the draft was absent from `/work`, explicit publish, and confirmation that the published item appeared on `/work`.
 - This proves the user-visible publishing vertical slice. Direct database-row inspection, direct anonymous draft-object denial, non-owner rejection, and internal Storage promotion/removal were not separately recorded in this checkpoint.
+- After the `/work` refinement, the configured production route returned 200 and rendered the two live published items rather than development fallback content. A read-only anonymous REST check returned the same two published rows and zero draft rows under live RLS.
+- Headless interaction checks at 1440×1000 and an exact 375×812 CSS viewport confirmed natural index proportions, `contain`-preserved focused media, native Escape close, explicit back-button close, scroll lock cleanup, a single mobile column, 52px mobile view targets, and no horizontal overflow.
 
 ## Product direction
 
@@ -72,6 +75,7 @@ Aftercare, design-to-tattoo pairing, advanced CRM automation, payment processing
 - The supplied images are development/client-provided content; final publication approval and migration into `portfolio-media` remain pending.
 - The hero uses three development tattoos; `/work` exposes all four only when no real published Supabase rows are available.
 - Non-owner rejection, direct anonymous access denial for draft objects, and internal row/object state were not independently inspected during the reported live flow.
+- The focused work view is intentionally stateful rather than URL-addressable; deep-linking individual portfolio items remains an open product decision rather than part of this pass.
 
 ## Current milestone
 
