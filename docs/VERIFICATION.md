@@ -1,5 +1,17 @@
 # Client Website A — Verification Contract
 
+## Live development Supabase publishing — 2026-08-13
+
+**User-observed live evidence**
+
+1. Password login succeeded for the owner.
+2. An image upload succeeded and the item was saved as a private draft.
+3. The draft was confirmed absent from `/work` before publication.
+4. The owner explicitly published the item.
+5. The published item was confirmed visible on `/work`.
+
+This is successful end-to-end evidence for the user-visible development publishing slice. This checkpoint does not claim direct observation of database rows, draft-object URL denial, internal private-to-public object promotion/removal, valid non-owner rejection, or production behavior.
+
 ## First baseline checkpoint — 2026-08-13
 
 - `npm run format`, `npm run format:check`, `npm run lint`, `npm run typecheck`, `npm test`, and `npm run build` pass; all 7 tests remain green and ESLint reports no warnings.
@@ -69,14 +81,12 @@
 - Final desktop and mobile refinement renders confirm the continuous gray overlay and repeated horizontal strokes are absent; the visible treatment is concentrated near the lower boundary with an irregular displaced contour and sparse erosion flecks.
 - Final artifact-cleanup inspection at 1440px and an exact emulated 375-CSS-pixel viewport (`window.innerWidth = 375`) confirms no detached light/gray flecks remain above the contour and no dark horizontal seam remains at the ivory boundary.
 
-## Still required with development Supabase
+## Remaining live verification
 
-- Successful password login by the allowlisted owner.
 - Rejection of a valid but non-owner account.
-- Successful private upload and corresponding item/media rows.
-- Direct anonymous denial of the draft object.
-- Published-state update, public object copy, draft removal, and public gallery visibility.
-- Unpublished item absence from the public query under real RLS.
+- Direct anonymous denial of the draft object URL.
+- Direct inspection of the corresponding item/media rows and the private-to-public Storage promotion/removal.
+- Equivalent verification against a separate production project before deployment.
 
 ## Phase 3 minimum ladder
 

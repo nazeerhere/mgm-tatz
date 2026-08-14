@@ -1,5 +1,30 @@
 # Client Website A — Trajectory
 
+## 2026-08-13 — Live Supabase publishing checkpoint
+
+**Objective**
+
+Record the successful development-project publishing path without changing application behavior or adding features.
+
+**Observed live flow**
+
+- Nazeer signed in through password-based owner authentication.
+- Nazeer uploaded an image and saved it as a private draft.
+- The unpublished draft was confirmed absent from `/work`.
+- Nazeer explicitly published the item.
+- The published item was confirmed visible on `/work`.
+
+These observations verify the user-visible owner login → upload → private draft → publish → public gallery vertical slice. They do not independently prove unobserved internal row/object transitions, direct anonymous draft-object denial, or rejection of a valid non-owner account.
+
+**Changes**
+
+- Updated only canonical project-memory documents to distinguish the newly observed live path from remaining verification gaps.
+- Added no feature, dependency, migration, configuration, route, backend, or visual change.
+
+**Drift check**
+
+Documentation-only checkpoint. Supabase architecture, auth, schema, Storage, RLS, publishing logic, application code, routes, client content, deployment, and remote configuration are unchanged.
+
 ## 2026-08-13 — First repository baseline
 
 **Objective**
