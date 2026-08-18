@@ -1,3 +1,5 @@
+import type { GalleryStyleSlug } from "@/lib/gallery-filters";
+
 export type DevelopmentMedia = {
   src: string;
   width: number;
@@ -7,6 +9,8 @@ export type DevelopmentMedia = {
   type: "tattoo" | "drawing";
   objectPosition?: string;
   objectFit?: "cover" | "contain";
+  styleSlugs: readonly GalleryStyleSlug[];
+  featured?: boolean;
 };
 
 export const developmentTattoos = [
@@ -18,6 +22,8 @@ export const developmentTattoos = [
     title: "Tiger",
     type: "tattoo",
     objectPosition: "52% 50%",
+    styleSlugs: ["black-grey", "illustrative", "animals"],
+    featured: true,
   },
   {
     src: "/client-media/eagle-tattoo.jpg",
@@ -27,6 +33,8 @@ export const developmentTattoos = [
     title: "Eagle",
     type: "tattoo",
     objectPosition: "55% 50%",
+    styleSlugs: ["black-grey", "illustrative", "animals"],
+    featured: true,
   },
   {
     src: "/client-media/anatomical-figure-tattoo.jpg",
@@ -36,6 +44,8 @@ export const developmentTattoos = [
     title: "Anatomical figure",
     type: "tattoo",
     objectPosition: "51% 48%",
+    styleSlugs: ["black-grey", "illustrative", "dark-fantasy"],
+    featured: true,
   },
   {
     src: "/client-media/illustrative-figures-tattoo.jpg",
@@ -46,10 +56,12 @@ export const developmentTattoos = [
     type: "tattoo",
     objectPosition: "50% 50%",
     objectFit: "contain",
+    styleSlugs: ["black-grey", "illustrative", "dark-fantasy"],
+    featured: true,
   },
 ] as const satisfies readonly DevelopmentMedia[];
 
-export const developmentHeroTattoos = developmentTattoos.slice(0, 3);
+export const developmentHeroTattoos = developmentTattoos.slice(0, 4);
 
 export const developmentDrawings = [
   {
@@ -59,6 +71,7 @@ export const developmentDrawings = [
     alt: "Sketchbook spread of dark-fantasy characters drawn in black, red, and blue ink.",
     title: "Dark-fantasy study",
     type: "drawing",
+    styleSlugs: ["illustrative", "anime-manga", "dark-fantasy"],
   },
   {
     src: "/client-media/classical-portrait-study.jpg",
@@ -67,6 +80,7 @@ export const developmentDrawings = [
     alt: "Graphite study of layered classical faces with a restrained gold accent.",
     title: "Classical portrait study",
     type: "drawing",
+    styleSlugs: ["black-grey", "classical"],
   },
   {
     src: "/client-media/veiled-face-study.jpg",
@@ -75,6 +89,7 @@ export const developmentDrawings = [
     alt: "Grayscale drawing of a veiled face with folded fabric.",
     title: "Veiled figure study",
     type: "drawing",
+    styleSlugs: ["black-grey", "classical"],
   },
   {
     src: "/client-media/religious-composition.jpg",
@@ -83,6 +98,17 @@ export const developmentDrawings = [
     alt: "Tall colored classical and religious composition with angels, figures, and white star forms.",
     title: "Classical composition",
     type: "drawing",
+    styleSlugs: ["illustrative", "dark-fantasy", "classical"],
+  },
+  {
+    src: "/client-media/mechanical-character-sketch.jpg",
+    width: 1536,
+    height: 1441,
+    alt: "Red-ink sketchbook drawing of a fantasy character seated beside a four-legged mechanical cannon.",
+    title: "Mechanical character study",
+    type: "drawing",
+    objectFit: "contain",
+    styleSlugs: ["illustrative", "anime-manga"],
   },
 ] as const satisfies readonly DevelopmentMedia[];
 
@@ -94,4 +120,5 @@ export const milesPortrait = {
   title: "Miles in the studio",
   type: "drawing",
   objectPosition: "50% 65%",
+  styleSlugs: ["black-grey"],
 } as const satisfies DevelopmentMedia;

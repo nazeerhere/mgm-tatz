@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 90 1800" preserveAspectRatio="none">
+  <defs>
+    <filter id="edge" x="-25%" y="-3%" width="150%" height="106%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency=".08 .006" numOctaves="3" seed="43" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="13" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+  </defs>
+  <path
+    fill="white"
+    filter="url(#edge)"
+    d="M0 0H48C55 76 42 148 53 225C59 297 45 374 56 451C61 528 43 605 52 681C60 757 46 832 57 910C62 987 43 1062 53 1139C59 1215 47 1291 56 1368C61 1447 42 1522 52 1600C58 1668 47 1740 55 1800H0Z"
+  />
+</svg>

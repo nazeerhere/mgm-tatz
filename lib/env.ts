@@ -21,3 +21,12 @@ export function getOwnerUserId() {
   if (!ownerUserId) throw new Error("OWNER_USER_ID is not configured.");
   return ownerUserId;
 }
+
+export function getConsultationSupabaseEnvironment() {
+  const { url } = getSupabaseEnvironment();
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!serviceRoleKey) {
+    throw new Error("Consultation Supabase access is not configured.");
+  }
+  return { url, serviceRoleKey };
+}

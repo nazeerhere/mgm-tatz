@@ -1,0 +1,3853 @@
+diff --git a/.env.example b/.env.example
+index f10819b..d95142f 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,5 +1,13 @@
+ NEXT_PUBLIC_SUPABASE_URL=https://your-development-project.supabase.co
+ NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your-development-publishable-key
+ 
++# Server-only. Used only by the validated public consultation action.
++SUPABASE_SERVICE_ROLE_KEY=your-development-service-role-key
++
++# Mailchimp Marketing API (server-only; never prefix these with NEXT_PUBLIC_).
++MAILCHIMP_API_KEY=your-mailchimp-api-key
++MAILCHIMP_SERVER_PREFIX=us21
++MAILCHIMP_AUDIENCE_ID=your-mailchimp-audience-id
++
+ # The authenticated Supabase user's UUID. Only this user may administer content.
+ OWNER_USER_ID=00000000-0000-0000-0000-000000000000
+diff --git a/app/actions/portfolio.ts b/app/actions/portfolio.ts
+index e48c5b4..8087bda 100644
+--- a/app/actions/portfolio.ts
++++ b/app/actions/portfolio.ts
+@@ -1,30 +1,30 @@
+ "use server";
+ 
+ import { randomUUID } from "node:crypto";
++import type { SupabaseClient } from "@supabase/supabase-js";
+ import { revalidatePath } from "next/cache";
+ import { redirect } from "next/navigation";
+ import { requireOwner } from "@/lib/auth";
+ import {
++  BULK_DRAFT_DESCRIPTION,
+   buildStorageKey,
+   hasValidImageSignature,
++  parseHomepageSlot,
++  type BulkDraftActionResult,
+   validatePortfolioInput,
++  validatePortfolioMetadata,
+ } from "@/lib/portfolio";
+ 
+-export async function createPortfolioItem(formData: FormData) {
+-  let input;
+-  try {
+-    input = validatePortfolioInput(formData);
+-  } catch (error) {
+-    redirect(
+-      `/admin/portfolio/new?error=${encodeURIComponent(error instanceof Error ? error.message : "Invalid submission.")}`,
+-    );
+-  }
+-  const { supabase } = await requireOwner();
++type PortfolioDraftInput = ReturnType<typeof validatePortfolioInput>;
++
++async function persistPortfolioDraft(
++  supabase: SupabaseClient,
++  input: PortfolioDraftInput,
++) {
+   const imageBytes = new Uint8Array(await input.image.arrayBuffer());
+   if (!hasValidImageSignature(imageBytes, input.image.type))
+-    redirect(
+-      "/admin/portfolio/new?error=Image%20content%20does%20not%20match%20its%20file%20type.",
+-    );
++    throw new Error("Image content does not match its file type.");
++
+   const itemId = randomUUID();
+   const mediaId = randomUUID();
+   const storageKey = buildStorageKey(itemId, mediaId, input.image.type);
+@@ -34,8 +34,7 @@ export async function createPortfolioItem(formData: FormData) {
+       contentType: input.image.type,
+       upsert: false,
+     });
+-  if (uploadError)
+-    redirect("/admin/portfolio/new?error=Image%20upload%20failed.");
++  if (uploadError) throw new Error("Image upload failed.");
+ 
+   const { error: itemError } = await supabase.from("portfolio_items").insert({
+     id: itemId,
+@@ -43,14 +42,17 @@ export async function createPortfolioItem(formData: FormData) {
+     type: input.type,
+     description: input.description,
+     body_placement: input.bodyPlacement,
+-    featured: formData.get("featured") === "on",
+-    available: formData.get("available") === "on",
++    featured: false,
++    available: false,
+     published: false,
++    show_in_gallery: true,
++    homepage_order: null,
+   });
+   if (itemError) {
+     await supabase.storage.from("portfolio-drafts").remove([storageKey]);
+-    redirect("/admin/portfolio/new?error=Metadata%20could%20not%20be%20saved.");
++    throw new Error("Metadata could not be saved.");
+   }
++
+   const { error: mediaError } = await supabase.from("portfolio_media").insert({
+     id: mediaId,
+     portfolio_item_id: itemId,
+@@ -63,21 +65,64 @@ export async function createPortfolioItem(formData: FormData) {
+   if (mediaError) {
+     await supabase.from("portfolio_items").delete().eq("id", itemId);
+     await supabase.storage.from("portfolio-drafts").remove([storageKey]);
+-    redirect(
+-      "/admin/portfolio/new?error=Media%20metadata%20could%20not%20be%20saved.",
+-    );
++    throw new Error("Media metadata could not be saved.");
+   }
++
++  return itemId;
++}
++
++function errorMessage(error: unknown, fallback = "Portfolio update failed.") {
++  return error instanceof Error ? error.message : fallback;
++}
++
++function portfolioItemPath(itemId: string) {
++  return `/admin/portfolio/${encodeURIComponent(itemId)}`;
++}
++
++export async function createPortfolioItem(formData: FormData) {
++  const { supabase } = await requireOwner();
++  let error: string | null = null;
++  try {
++    const input = validatePortfolioInput(formData);
++    await persistPortfolioDraft(supabase, input);
++  } catch (caught) {
++    error = errorMessage(caught, "Invalid submission.");
++  }
++
++  if (error)
++    redirect(`/admin/portfolio/new?error=${encodeURIComponent(error)}`);
+   revalidatePath("/admin");
+   redirect("/admin?saved=1");
+ }
+ 
++export async function createBulkPortfolioDraft(
++  formData: FormData,
++): Promise<BulkDraftActionResult> {
++  const { supabase } = await requireOwner();
++  try {
++    formData.set("description", BULK_DRAFT_DESCRIPTION);
++    formData.set("bodyPlacement", "");
++    const input = validatePortfolioInput(formData);
++    const itemId = await persistPortfolioDraft(supabase, input);
++    revalidatePath("/admin");
++    return {
++      status: "success",
++      message:
++        "Private draft uploaded. Edit its description before publishing.",
++      itemId,
++    };
++  } catch (error) {
++    return { status: "error", message: errorMessage(error) };
++  }
++}
++
+ export async function publishPortfolioItem(formData: FormData) {
+   const itemId = String(formData.get("itemId") ?? "");
+   const { supabase } = await requireOwner();
+   const { data: item } = await supabase
+     .from("portfolio_items")
+     .select(
+-      "id,published,portfolio_media!inner(id,storage_bucket,storage_key,mime_type,is_primary)",
++      "id,published,description,portfolio_media!inner(id,storage_bucket,storage_key,mime_type,is_primary)",
+     )
+     .eq("id", itemId)
+     .eq("portfolio_media.is_primary", true)
+@@ -90,6 +135,10 @@ export async function publishPortfolioItem(formData: FormData) {
+     media.storage_bucket !== "portfolio-drafts"
+   )
+     redirect("/admin?error=Item%20cannot%20be%20published.");
++  if (item.description === BULK_DRAFT_DESCRIPTION)
++    redirect(
++      `${portfolioItemPath(itemId)}?error=Add%20an%20approved%20description%20before%20publishing.`,
++    );
+   const { data: draft, error: downloadError } = await supabase.storage
+     .from("portfolio-drafts")
+     .download(media.storage_key);
+@@ -129,3 +178,154 @@ export async function publishPortfolioItem(formData: FormData) {
+   revalidatePath("/admin");
+   redirect("/admin?published=1");
+ }
++
++export async function updatePortfolioMetadata(formData: FormData) {
++  const itemId = String(formData.get("itemId") ?? "");
++  let metadata;
++  try {
++    metadata = validatePortfolioMetadata(formData);
++  } catch (error) {
++    redirect(
++      `${portfolioItemPath(itemId)}?error=${encodeURIComponent(errorMessage(error))}`,
++    );
++  }
++
++  const { supabase } = await requireOwner();
++  const { error: itemError } = await supabase
++    .from("portfolio_items")
++    .update({
++      title: metadata.title,
++      type: metadata.type,
++      description: metadata.description,
++      body_placement: metadata.bodyPlacement,
++    })
++    .eq("id", itemId);
++  if (itemError)
++    redirect(
++      `${portfolioItemPath(itemId)}?error=Portfolio%20metadata%20could%20not%20be%20updated.`,
++    );
++
++  const { error: mediaError } = await supabase
++    .from("portfolio_media")
++    .update({ alt_text: metadata.altText })
++    .eq("portfolio_item_id", itemId)
++    .eq("is_primary", true);
++  if (mediaError)
++    redirect(
++      `${portfolioItemPath(itemId)}?error=Image%20description%20could%20not%20be%20updated.`,
++    );
++
++  revalidatePath("/");
++  revalidatePath("/work");
++  revalidatePath("/admin");
++  redirect("/admin?updated=1");
++}
++
++export async function updatePortfolioPlacement(formData: FormData) {
++  const itemId = String(formData.get("itemId") ?? "");
++  let homepageOrder;
++  try {
++    homepageOrder = parseHomepageSlot(formData.get("homepageOrder"));
++  } catch (error) {
++    redirect(`/admin?error=${encodeURIComponent(errorMessage(error))}`);
++  }
++
++  const { supabase } = await requireOwner();
++  const { error } = await supabase.rpc("set_portfolio_placement", {
++    target_item_id: itemId,
++    gallery_visible: formData.get("showInGallery") === "on",
++    target_homepage_order: homepageOrder,
++  });
++  if (error)
++    redirect(
++      "/admin?error=Placement%20could%20not%20be%20updated.%20Confirm%20the%20item%20is%20published.",
++    );
++
++  revalidatePath("/");
++  revalidatePath("/work");
++  revalidatePath("/admin");
++  redirect("/admin?placement=1");
++}
++
++export async function unpublishPortfolioItem(formData: FormData) {
++  const itemId = String(formData.get("itemId") ?? "");
++  const { supabase } = await requireOwner();
++  const { data: item } = await supabase
++    .from("portfolio_items")
++    .select(
++      "id,published,featured,homepage_order,portfolio_media!inner(id,storage_bucket,storage_key,mime_type,is_primary)",
++    )
++    .eq("id", itemId)
++    .eq("portfolio_media.is_primary", true)
++    .single();
++  const media = item?.portfolio_media?.[0];
++  if (
++    !item ||
++    !media ||
++    !item.published ||
++    media.storage_bucket !== "portfolio-media"
++  )
++    redirect("/admin?error=Item%20cannot%20be%20unpublished.");
++
++  const { data: publicImage, error: downloadError } = await supabase.storage
++    .from("portfolio-media")
++    .download(media.storage_key);
++  if (downloadError)
++    redirect("/admin?error=Public%20image%20could%20not%20be%20read.");
++
++  const { error: draftUploadError } = await supabase.storage
++    .from("portfolio-drafts")
++    .upload(media.storage_key, publicImage, {
++      contentType: media.mime_type,
++      upsert: false,
++    });
++  if (draftUploadError)
++    redirect("/admin?error=Private%20draft%20could%20not%20be%20restored.");
++
++  const { error: mediaUpdateError } = await supabase
++    .from("portfolio_media")
++    .update({ storage_bucket: "portfolio-drafts" })
++    .eq("id", media.id);
++  if (mediaUpdateError) {
++    await supabase.storage.from("portfolio-drafts").remove([media.storage_key]);
++    redirect("/admin?error=Media%20state%20could%20not%20be%20updated.");
++  }
++
++  const { error: itemUpdateError } = await supabase
++    .from("portfolio_items")
++    .update({ published: false, featured: false, homepage_order: null })
++    .eq("id", itemId);
++  if (itemUpdateError) {
++    await supabase
++      .from("portfolio_media")
++      .update({ storage_bucket: "portfolio-media" })
++      .eq("id", media.id);
++    await supabase.storage.from("portfolio-drafts").remove([media.storage_key]);
++    redirect("/admin?error=Item%20could%20not%20be%20unpublished.");
++  }
++
++  const { error: publicRemoveError } = await supabase.storage
++    .from("portfolio-media")
++    .remove([media.storage_key]);
++  if (publicRemoveError) {
++    await supabase
++      .from("portfolio_items")
++      .update({
++        published: true,
++        featured: item.featured,
++        homepage_order: item.homepage_order,
++      })
++      .eq("id", itemId);
++    await supabase
++      .from("portfolio_media")
++      .update({ storage_bucket: "portfolio-media" })
++      .eq("id", media.id);
++    await supabase.storage.from("portfolio-drafts").remove([media.storage_key]);
++    redirect("/admin?error=Public%20media%20could%20not%20be%20removed.");
++  }
++
++  revalidatePath("/");
++  revalidatePath("/work");
++  revalidatePath("/admin");
++  redirect("/admin?unpublished=1");
++}
+diff --git a/app/admin/page.tsx b/app/admin/page.tsx
+index 00c1741..c2806f4 100644
+--- a/app/admin/page.tsx
++++ b/app/admin/page.tsx
+@@ -1,20 +1,34 @@
+ import Link from "next/link";
+ import { logout } from "@/app/actions/auth";
+-import { publishPortfolioItem } from "@/app/actions/portfolio";
++import {
++  publishPortfolioItem,
++  unpublishPortfolioItem,
++  updatePortfolioPlacement,
++} from "@/app/actions/portfolio";
+ import { requireOwner } from "@/lib/auth";
++import { homepageSlots, resolveSurfaceVisibility } from "@/lib/portfolio";
+ 
+ export const dynamic = "force-dynamic";
+ 
+ export default async function AdminPage({
+   searchParams,
+ }: {
+-  searchParams: Promise<{ saved?: string; published?: string; error?: string }>;
++  searchParams: Promise<{
++    saved?: string;
++    published?: string;
++    unpublished?: string;
++    updated?: string;
++    placement?: string;
++    error?: string;
++  }>;
+ }) {
+   const { supabase } = await requireOwner();
+   const params = await searchParams;
+-  const { data: items } = await supabase
++  const { data: items, error: itemsError } = await supabase
+     .from("portfolio_items")
+-    .select("id,title,type,published,created_at,portfolio_media(id,alt_text)")
++    .select(
++      "id,title,type,published,show_in_gallery,featured,homepage_order,created_at,portfolio_media(id,alt_text)",
++    )
+     .order("created_at", { ascending: false });
+   return (
+     <section className="admin-shell">
+@@ -37,13 +51,34 @@ export default async function AdminPage({
+           Item published to the public gallery.
+         </p>
+       ) : null}
++      {params.unpublished ? (
++        <p className="form-success" role="status">
++          Item returned to a private draft.
++        </p>
++      ) : null}
++      {params.updated ? (
++        <p className="form-success" role="status">
++          Portfolio metadata updated.
++        </p>
++      ) : null}
++      {params.placement ? (
++        <p className="form-success" role="status">
++          Public placement updated.
++        </p>
++      ) : null}
+       {params.error ? (
+         <p className="form-error" role="alert">
+           {params.error}
+         </p>
+       ) : null}
++      {itemsError ? (
++        <p className="form-error" role="alert">
++          Portfolio placement controls require the latest checked-in Supabase
++          migration.
++        </p>
++      ) : null}
+       <Link className="button button-dark" href="/admin/portfolio/new">
+-        Add portfolio item
++        Upload image batch
+       </Link>
+       <div className="admin-list">
+         <div className="admin-list-heading">
+@@ -51,27 +86,96 @@ export default async function AdminPage({
+           <span>{items?.length ?? 0} total</span>
+         </div>
+         {items?.length ? (
+-          items.map((item) => (
+-            <article key={item.id} className="admin-row">
+-              <div>
+-                <span
+-                  className={`state ${item.published ? "published" : "draft"}`}
+-                >
+-                  {item.published ? "Published" : "Private draft"}
+-                </span>
+-                <h3>{item.title}</h3>
+-                <p>{item.type}</p>
+-              </div>
+-              {!item.published ? (
+-                <form action={publishPortfolioItem}>
+-                  <input type="hidden" name="itemId" value={item.id} />
+-                  <button className="button button-dark">Publish</button>
+-                </form>
+-              ) : (
+-                <Link href="/work">View public →</Link>
+-              )}
+-            </article>
+-          ))
++          items.map((item) => {
++            const visibility = resolveSurfaceVisibility({
++              published: item.published,
++              showInGallery: item.show_in_gallery,
++              homepageOrder: item.featured ? item.homepage_order : null,
++            });
++            return (
++              <article key={item.id} className="admin-row admin-portfolio-row">
++                <div className="admin-item-summary">
++                  <span
++                    className={`state ${item.published ? "published" : "draft"}`}
++                  >
++                    {item.published ? "Published" : "Private draft"}
++                  </span>
++                  <h3>{item.title}</h3>
++                  <p>{item.type}</p>
++                  <dl className="surface-statuses">
++                    <div>
++                      <dt>Gallery</dt>
++                      <dd>{visibility.gallery ? "Visible" : "Hidden"}</dd>
++                    </div>
++                    <div>
++                      <dt>Homepage</dt>
++                      <dd>
++                        {visibility.homepage
++                          ? `Slot ${item.homepage_order}`
++                          : "Not shown"}
++                      </dd>
++                    </div>
++                  </dl>
++                  <Link href={`/admin/portfolio/${item.id}`}>
++                    Edit metadata →
++                  </Link>
++                </div>
++
++                <div className="admin-item-controls">
++                  {item.published ? (
++                    <>
++                      <form
++                        action={updatePortfolioPlacement}
++                        className="placement-form"
++                      >
++                        <input type="hidden" name="itemId" value={item.id} />
++                        <label className="placement-checkbox">
++                          <input
++                            name="showInGallery"
++                            type="checkbox"
++                            defaultChecked={item.show_in_gallery}
++                          />
++                          Show in gallery
++                        </label>
++                        <label>
++                          Homepage
++                          <select
++                            name="homepageOrder"
++                            defaultValue={
++                              item.featured && item.homepage_order
++                                ? String(item.homepage_order)
++                                : ""
++                            }
++                          >
++                            <option value="">Not shown</option>
++                            {homepageSlots.map((slot) => (
++                              <option value={slot} key={slot}>
++                                Slot {slot}
++                              </option>
++                            ))}
++                          </select>
++                        </label>
++                        <button className="button button-dark">
++                          Save placement
++                        </button>
++                      </form>
++                      <form action={unpublishPortfolioItem}>
++                        <input type="hidden" name="itemId" value={item.id} />
++                        <button className="text-button danger-text-button">
++                          Unpublish to private draft
++                        </button>
++                      </form>
++                    </>
++                  ) : (
++                    <form action={publishPortfolioItem}>
++                      <input type="hidden" name="itemId" value={item.id} />
++                      <button className="button button-dark">Publish</button>
++                    </form>
++                  )}
++                </div>
++              </article>
++            );
++          })
+         ) : (
+           <p className="empty-state light">No portfolio items yet.</p>
+         )}
+diff --git a/app/admin/portfolio/new/page.tsx b/app/admin/portfolio/new/page.tsx
+index ffb947b..516afd5 100644
+--- a/app/admin/portfolio/new/page.tsx
++++ b/app/admin/portfolio/new/page.tsx
+@@ -1,86 +1,23 @@
+ import Link from "next/link";
+-import { createPortfolioItem } from "@/app/actions/portfolio";
++import { BulkUploadForm } from "@/components/bulk-upload-form";
+ import { requireOwner } from "@/lib/auth";
+-import { portfolioTypes } from "@/lib/portfolio";
+ 
+ export const dynamic = "force-dynamic";
+ 
+-export default async function NewPortfolioItemPage({
+-  searchParams,
+-}: {
+-  searchParams: Promise<{ error?: string }>;
+-}) {
++export default async function NewPortfolioItemPage() {
+   await requireOwner();
+-  const { error } = await searchParams;
+   return (
+     <section className="admin-shell">
+       <Link className="back-link" href="/admin">
+         ← Portfolio desk
+       </Link>
+       <p className="kicker">New work</p>
+-      <h1>Create a private draft.</h1>
+-      {error ? (
+-        <p className="form-error" role="alert">
+-          {error}
+-        </p>
+-      ) : null}
+-      <form
+-        action={createPortfolioItem}
+-        className="admin-form upload-form"
+-        encType="multipart/form-data"
+-      >
+-        <label>
+-          Title
+-          <input name="title" minLength={2} maxLength={100} required />
+-        </label>
+-        <label>
+-          Type
+-          <select name="type" required>
+-            {portfolioTypes.map((type) => (
+-              <option value={type} key={type}>
+-                {type[0].toUpperCase() + type.slice(1)}
+-              </option>
+-            ))}
+-          </select>
+-        </label>
+-        <label>
+-          Description
+-          <textarea
+-            name="description"
+-            minLength={10}
+-            maxLength={800}
+-            rows={6}
+-            required
+-          />
+-        </label>
+-        <label>
+-          Body placement <span>Optional; primarily for tattoos.</span>
+-          <input name="bodyPlacement" maxLength={100} />
+-        </label>
+-        <label>
+-          Primary image <span>JPEG, PNG, or WebP; maximum 10 MB.</span>
+-          <input
+-            name="image"
+-            type="file"
+-            accept="image/jpeg,image/png,image/webp"
+-            required
+-          />
+-        </label>
+-        <label>
+-          Image description{" "}
+-          <span>Describe visible content for screen-reader users.</span>
+-          <input name="altText" minLength={5} maxLength={180} required />
+-        </label>
+-        <div className="check-row">
+-          <label>
+-            <input name="featured" type="checkbox" /> Featured work
+-          </label>
+-          <label>
+-            <input name="available" type="checkbox" /> Available concept
+-          </label>
+-        </div>
+-        <button className="button button-dark">Save private draft</button>
+-      </form>
++      <h1>Build a private batch.</h1>
++      <p className="admin-intro">
++        Select several images at once, review their working titles and image
++        descriptions, then upload each as an independent private draft.
++      </p>
++      <BulkUploadForm />
+     </section>
+   );
+ }
+diff --git a/app/globals.css b/app/globals.css
+index eab6203..9cac84b 100644
+--- a/app/globals.css
++++ b/app/globals.css
+@@ -457,6 +457,7 @@ body {
+   display: grid;
+   width: 3rem;
+   aspect-ratio: 1;
++  overflow: hidden;
+   place-items: center;
+   border: 1px solid #cabda8;
+   border-radius: 50%;
+@@ -465,6 +466,12 @@ body {
+   font-family: var(--serif);
+   font-size: 1.35rem;
+ }
++.brand-seal img {
++  display: block;
++  width: 100%;
++  height: 100%;
++  object-fit: cover;
++}
+ .wordmark,
+ .footer-wordmark {
+   font-family: var(--serif);
+@@ -1641,20 +1648,22 @@ body {
+   position: absolute;
+   z-index: 4;
+   right: 0;
+-  bottom: 0;
++  bottom: -1px;
+   left: 0;
+   width: 100%;
+-  height: clamp(3rem, 6vw, 8.75rem);
++  height: calc(clamp(3rem, 6vw, 8.75rem) + 1px);
+   pointer-events: none;
+   background: var(--paper);
+   transform: none;
+-  -webkit-mask: url("/charcoal-erosion-mask.svg") center / 100% 100% no-repeat;
+-  mask: url("/charcoal-erosion-mask.svg") center / 100% 100% no-repeat;
++  -webkit-mask: url("/charcoal-erosion-mask.svg") center / calc(100% + 1rem)
++    100% no-repeat;
++  mask: url("/charcoal-erosion-mask.svg") center / calc(100% + 1rem) 100%
++    no-repeat;
+ }
+ .about-band::after,
+ .info-band::after {
+   right: 0;
+-  bottom: 0;
++  bottom: -1px;
+   left: 0;
+ }
+ .drawings-band::after,
+@@ -1668,10 +1677,10 @@ body {
+   .about-band::after,
+   .info-band::after {
+     right: 0;
+-    bottom: 0;
++    bottom: -1px;
+     left: 0;
+     width: 100%;
+-    height: 5rem;
++    height: calc(5rem + 1px);
+   }
+ }
+ 
+@@ -1933,3 +1942,1940 @@ body {
+     transition: none;
+   }
+ }
++
++/* Shared newsletter signup */
++.newsletter-form {
++  width: 100%;
++  max-width: 43rem;
++}
++.newsletter-form > label {
++  display: block;
++  margin-bottom: 0.55rem;
++  color: #544c41;
++  font-size: 0.63rem;
++  font-weight: 800;
++  letter-spacing: 0.12em;
++  text-transform: uppercase;
++}
++.newsletter-controls {
++  display: grid;
++  grid-template-columns: minmax(0, 1fr) auto;
++  border-bottom: 1px solid #7f725f;
++}
++.newsletter-controls:focus-within {
++  border-bottom-color: var(--gold);
++  box-shadow: 0 1px 0 var(--gold);
++}
++.newsletter-controls input {
++  min-width: 0;
++  min-height: 3.25rem;
++  padding: 0.65rem 0;
++  border: 0;
++  outline: 0;
++  color: var(--ink);
++  background: transparent;
++  font: inherit;
++  font-size: 0.95rem;
++}
++.newsletter-controls input::placeholder {
++  color: #8a8175;
++}
++.newsletter-controls input[aria-invalid="true"] {
++  color: #713b31;
++}
++.newsletter-submit {
++  min-height: 3.25rem;
++  padding: 0.65rem 1.15rem;
++  border: 0;
++  color: #f4eee4;
++  background: #171512;
++  font: inherit;
++  font-size: 0.65rem;
++  font-weight: 800;
++  letter-spacing: 0.11em;
++  text-transform: uppercase;
++  cursor: pointer;
++}
++.newsletter-submit:hover:not(:disabled) {
++  color: var(--gold);
++}
++.newsletter-submit:disabled {
++  opacity: 0.65;
++  cursor: wait;
++}
++.newsletter-message {
++  min-height: 1.4rem;
++  margin: 0.7rem 0 0;
++  color: #6d655a;
++  font-size: 0.75rem;
++}
++.newsletter-message.error {
++  color: #874438;
++}
++.newsletter-message.success {
++  color: #496654;
++}
++
++@media (max-width: 480px) {
++  .newsletter-controls {
++    grid-template-columns: 1fr;
++    gap: 0.75rem;
++    border-bottom: 0;
++  }
++  .newsletter-controls:focus-within {
++    box-shadow: none;
++  }
++  .newsletter-controls input {
++    padding-inline: 0.75rem;
++    border: 1px solid #9b8e7a;
++  }
++  .newsletter-submit {
++    width: 100%;
++    min-height: 3rem;
++  }
++}
++
++/* Split consultation presentation */
++.consultation-split {
++  --consultation-paper: #c4b294;
++  --consultation-paper-texture-opacity: 0.78;
++  --consultation-upper-art-opacity: 0.055;
++  --consultation-lower-art-opacity: 0.065;
++
++  display: grid;
++  grid-template-columns: minmax(19rem, 0.72fr) minmax(0, 1.78fr);
++  min-height: calc(100vh - 4rem);
++  color: #ede4d6;
++  background: #0c0c0b;
++}
++
++.consultation-sidebar {
++  position: relative;
++  min-width: 0;
++  overflow: hidden;
++  padding: clamp(3rem, 5vw, 5.5rem) clamp(2rem, 4vw, 4.5rem)
++    clamp(24rem, 32vw, 36rem);
++  border-right: 0;
++  color: #2a251f;
++  background-color: var(--consultation-paper);
++  background-image:
++    radial-gradient(
++      ellipse at 18% 10%,
++      rgb(247 234 207 / 16%),
++      transparent 35%
++    ),
++    radial-gradient(ellipse at 86% 54%, rgb(83 61 39 / 12%), transparent 44%),
++    linear-gradient(
++      101deg,
++      rgb(84 62 40 / 5%),
++      transparent 31% 72%,
++      rgb(66 48 31 / 9%)
++    );
++  background-repeat: no-repeat;
++  background-position: center;
++  background-size: cover;
++  background-blend-mode: soft-light, multiply, multiply;
++}
++
++.consultation-sidebar::before {
++  content: "";
++  position: absolute;
++  z-index: 0;
++  inset: 0;
++  pointer-events: none;
++  background: url("/consultation-paper.svg") center / cover no-repeat;
++  opacity: var(--consultation-paper-texture-opacity);
++  mix-blend-mode: multiply;
++}
++
++.consultation-sidebar-content {
++  position: relative;
++  z-index: 2;
++  max-width: 25rem;
++  margin-inline: auto;
++}
++
++.consultation-sidebar-brand {
++  display: flex;
++  align-items: center;
++  gap: 0.9rem;
++  margin-bottom: clamp(4rem, 7vw, 7rem);
++}
++
++.consultation-sidebar-brand > span {
++  display: block;
++  width: 3.75rem;
++  aspect-ratio: 1;
++  overflow: hidden;
++  border: 1px solid #aa8750;
++  border-radius: 50%;
++}
++
++.consultation-sidebar-brand img {
++  display: block;
++  width: 100%;
++  height: 100%;
++  object-fit: cover;
++}
++
++.consultation-sidebar-brand strong,
++.consultation-sidebar-brand small {
++  display: block;
++}
++
++.consultation-sidebar-brand strong {
++  font-family: var(--serif);
++  font-size: clamp(1.45rem, 2.4vw, 2.1rem);
++  font-weight: 400;
++  letter-spacing: 0.08em;
++}
++
++.consultation-sidebar-brand small {
++  margin-top: 0.15rem;
++  color: #8d6b3d;
++  font-size: 0.58rem;
++  font-weight: 800;
++  letter-spacing: 0.2em;
++  text-transform: uppercase;
++}
++
++.consultation-sidebar-intro h1 {
++  max-width: 8ch;
++  margin: 0.7rem 0 2rem;
++  font-size: clamp(3rem, 5vw, 5rem);
++  line-height: 0.98;
++}
++
++.consultation-sidebar-intro > p:last-child {
++  max-width: 22rem;
++  color: #5d564c;
++  font-family: var(--serif);
++  font-size: 0.95rem;
++  line-height: 1.75;
++}
++
++.consultation-email-note {
++  display: grid;
++  grid-template-columns: 2.7rem 1fr;
++  gap: 0.9rem;
++  align-items: start;
++  margin: 2.5rem 0 clamp(4rem, 6vw, 6rem);
++  padding-top: 1.35rem;
++  border-top: 1px solid #a9977c;
++}
++
++.consultation-email-note > span {
++  display: grid;
++  width: 2.4rem;
++  aspect-ratio: 1;
++  place-items: center;
++  border: 1px solid #a9834d;
++  border-radius: 50%;
++  color: #8b6839;
++}
++
++.consultation-email-note p {
++  margin: 0;
++  color: #665e52;
++  font-size: 0.72rem;
++  line-height: 1.65;
++}
++
++.consultation-email-note strong {
++  display: block;
++  margin-bottom: 0.2rem;
++  color: #493d2e;
++  font-size: 0.63rem;
++  letter-spacing: 0.1em;
++  text-transform: uppercase;
++}
++
++.consultation-process ol {
++  margin: 1.6rem 0 0;
++  padding: 0;
++  list-style: none;
++}
++
++.consultation-process li {
++  position: relative;
++  display: grid;
++  grid-template-columns: 2.5rem 1fr;
++  gap: 1rem;
++  min-height: 6.5rem;
++  padding-bottom: 1.5rem;
++}
++
++.consultation-process li:not(:last-child)::after {
++  content: "";
++  position: absolute;
++  top: 2.15rem;
++  bottom: 0.35rem;
++  left: 1.05rem;
++  border-left: 1px solid #b79b70;
++}
++
++.consultation-process li > span {
++  color: #8c6a3f;
++  font-family: var(--serif);
++  font-size: 1.7rem;
++  line-height: 1;
++}
++
++.consultation-process strong {
++  color: #433a2f;
++  font-size: 0.65rem;
++  letter-spacing: 0.1em;
++  text-transform: uppercase;
++}
++
++.consultation-process li p {
++  margin: 0.4rem 0 0;
++  color: #655d52;
++  font-family: var(--serif);
++  font-size: 0.76rem;
++  line-height: 1.55;
++}
++
++.consultation-sidebar-art {
++  position: absolute;
++  z-index: 1;
++  right: -12%;
++  bottom: -1%;
++  width: 112%;
++  height: clamp(23rem, 32vw, 37rem);
++  object-fit: cover;
++  object-position: 52% 57%;
++  opacity: 0.14;
++  filter: grayscale(1) contrast(1.45) brightness(0.82);
++  mix-blend-mode: multiply;
++  -webkit-mask-image: linear-gradient(
++    transparent,
++    #000 28% 86%,
++    transparent 100%
++  );
++  mask-image: linear-gradient(transparent, #000 28% 86%, transparent 100%);
++  pointer-events: none;
++}
++
++.consultation-panel {
++  position: relative;
++  min-width: 0;
++  overflow: hidden;
++  background:
++    radial-gradient(circle at 88% 8%, rgb(174 139 79 / 8%), transparent 28rem),
++    radial-gradient(circle at 18% 92%, rgb(103 83 54 / 8%), transparent 32rem),
++    linear-gradient(115deg, #0a0a09, #12110f 62%, #0a0a09);
++}
++
++.consultation-panel::before {
++  content: "";
++  position: absolute;
++  z-index: 3;
++  top: -1px;
++  bottom: -1px;
++  left: -1px;
++  width: 2.4rem;
++  pointer-events: none;
++  background: var(--consultation-paper);
++  -webkit-mask: url("/charcoal-panel-edge.svg") center / 100% 100% no-repeat;
++  mask: url("/charcoal-panel-edge.svg") center / 100% 100% no-repeat;
++}
++
++.consultation-panel-art {
++  position: absolute;
++  z-index: 0;
++  top: 2rem;
++  right: -9%;
++  width: min(45rem, 66%);
++  height: 48rem;
++  object-fit: cover;
++  object-position: 52% 28%;
++  opacity: var(--consultation-upper-art-opacity);
++  filter: grayscale(1) invert(1) contrast(1.55);
++  mix-blend-mode: screen;
++  -webkit-mask-image: linear-gradient(
++    90deg,
++    transparent,
++    #000 38% 75%,
++    transparent
++  );
++  mask-image: linear-gradient(90deg, transparent, #000 38% 75%, transparent);
++  pointer-events: none;
++}
++
++.consultation-panel-art-lower {
++  position: absolute;
++  z-index: 0;
++  right: -5%;
++  bottom: clamp(7rem, 10vw, 11rem);
++  width: min(48rem, 64%);
++  height: 44rem;
++  object-fit: contain;
++  object-position: center bottom;
++  opacity: var(--consultation-lower-art-opacity);
++  filter: grayscale(1) invert(1) contrast(1.7) brightness(0.9);
++  mix-blend-mode: screen;
++  -webkit-mask-image: radial-gradient(
++    ellipse 70% 62% at 54% 58%,
++    #000 24%,
++    rgb(0 0 0 / 88%) 54%,
++    transparent 84%
++  );
++  mask-image: radial-gradient(
++    ellipse 70% 62% at 54% 58%,
++    #000 24%,
++    rgb(0 0 0 / 88%) 54%,
++    transparent 84%
++  );
++  pointer-events: none;
++}
++
++.consultation-panel-inner {
++  position: relative;
++  z-index: 2;
++  width: min(100%, 74rem);
++  margin-inline: auto;
++  padding: clamp(4rem, 7vw, 7rem) clamp(2rem, 6vw, 6.5rem)
++    clamp(6rem, 9vw, 9rem);
++}
++
++.consultation-panel-heading {
++  max-width: 48rem;
++  margin-bottom: clamp(3.5rem, 6vw, 6rem);
++}
++
++.consultation-panel-heading h2 {
++  max-width: 14ch;
++  margin: 0.75rem 0 1.75rem;
++  color: #f1e8da;
++  font-size: clamp(3.4rem, 6.3vw, 6.6rem);
++  line-height: 0.95;
++}
++
++.consultation-panel-heading > p:last-child {
++  max-width: 36rem;
++  margin: 0;
++  padding-top: 1.4rem;
++  border-top: 1px solid #6d5a3e;
++  color: #aaa196;
++  font-family: var(--serif);
++  line-height: 1.7;
++}
++
++.consultation-panel .consultation-form,
++.consultation-panel .consultation-confirmation {
++  max-width: none;
++  color: #e9dfd1;
++}
++
++.consultation-panel .consultation-form-message {
++  margin-bottom: 2rem;
++  border-color: #c87666;
++  color: #efb6ac;
++  background: rgb(173 78 65 / 11%);
++}
++
++.consultation-form-section {
++  display: grid;
++  grid-template-columns: 7.25rem minmax(0, 1fr);
++  gap: clamp(1.5rem, 3vw, 3rem);
++  padding: clamp(1.5rem, 3vw, 2.5rem) 0;
++  border-top: 1px solid #4b4339;
++}
++
++.consultation-section-heading {
++  min-width: 0;
++}
++
++.consultation-section-heading > span {
++  display: block;
++  margin-bottom: 0.45rem;
++  color: #d3a965;
++  font-family: var(--serif);
++  font-size: 2.4rem;
++  line-height: 1;
++}
++
++.consultation-section-heading h3 {
++  margin: 0;
++  color: #eee4d5;
++  font-size: 0.76rem;
++  font-weight: 500;
++  letter-spacing: 0.11em;
++  line-height: 1.35;
++  text-transform: uppercase;
++}
++
++.consultation-section-heading p {
++  margin: 0.7rem 0 0;
++  color: #8f877c;
++  font-size: 0.65rem;
++  line-height: 1.55;
++}
++
++.consultation-section-fields {
++  display: grid;
++  grid-template-columns: repeat(2, minmax(0, 1fr));
++  gap: 0.75rem;
++  min-width: 0;
++}
++
++.consultation-panel .consultation-field {
++  gap: 0.45rem;
++  color: #d5ccc0;
++  font-size: 0.68rem;
++  font-weight: 550;
++  letter-spacing: 0.02em;
++  text-transform: none;
++}
++
++.consultation-panel .consultation-field > span,
++.consultation-panel .consultation-upload label > span {
++  justify-content: flex-start;
++  gap: 0.4rem;
++}
++
++.consultation-panel .consultation-field b {
++  color: #d5aa63;
++  font-size: 0.8rem;
++  letter-spacing: 0;
++}
++
++.consultation-panel .consultation-field em {
++  color: #817a71;
++  font-size: 0.56rem;
++  letter-spacing: 0.07em;
++}
++
++.consultation-panel .consultation-field small,
++.consultation-panel .consultation-upload label small {
++  color: #898177;
++  font-size: 0.67rem;
++}
++
++.consultation-panel .consultation-field input,
++.consultation-panel .consultation-field select,
++.consultation-panel .consultation-field textarea {
++  min-height: 3.55rem;
++  padding: 0.8rem 0.9rem;
++  border-color: #655a4b;
++  color: #ede5da;
++  background: rgb(7 7 7 / 38%);
++  color-scheme: dark;
++  font-size: 0.82rem;
++}
++
++.consultation-panel .consultation-field-required input,
++.consultation-panel .consultation-field-required select,
++.consultation-panel .consultation-field-required textarea {
++  border-color: #806a49;
++  background: rgb(16 14 11 / 58%);
++}
++
++.consultation-panel .consultation-field textarea {
++  min-height: 7rem;
++}
++
++.consultation-panel .consultation-field input::placeholder,
++.consultation-panel .consultation-field textarea::placeholder {
++  color: #817a70;
++}
++
++.consultation-panel .consultation-field input:focus-visible,
++.consultation-panel .consultation-field select:focus-visible,
++.consultation-panel .consultation-field textarea:focus-visible {
++  border-color: #c69c59;
++  background: rgb(21 18 14 / 82%);
++  box-shadow: 0 0 0 2px rgb(190 149 84 / 24%);
++}
++
++.consultation-panel .consultation-field input[aria-invalid="true"],
++.consultation-panel .consultation-field select[aria-invalid="true"],
++.consultation-panel .consultation-field textarea[aria-invalid="true"] {
++  border-color: #b66658;
++}
++
++.consultation-panel .consultation-field-error {
++  color: #e29c90;
++}
++
++.consultation-panel .consultation-upload {
++  align-content: start;
++  min-height: 13rem;
++  padding: 1.25rem;
++  border-color: #786244;
++  border-style: dashed;
++  background: rgb(10 9 8 / 42%);
++}
++
++.consultation-panel .consultation-upload input[type="file"] {
++  margin-top: 0.5rem;
++  border: 0;
++  color: #8f877d;
++  background: transparent;
++}
++
++.consultation-panel
++  .consultation-upload
++  input[type="file"]::file-selector-button {
++  min-height: 2.75rem;
++  border-color: #b99152;
++  color: #f1e4d1;
++  background: #70542f;
++}
++
++.consultation-panel .consultation-previews figure {
++  min-height: 9rem;
++  border-color: #79684f;
++  background: #201c17;
++}
++
++.consultation-acknowledgement {
++  display: flex;
++  min-height: 2.75rem;
++  align-items: flex-start;
++  gap: 0.75rem;
++  color: #bdb4a8;
++  font-size: 0.72rem;
++  line-height: 1.5;
++}
++
++.consultation-acknowledgement input {
++  width: 1.1rem;
++  height: 1.1rem;
++  flex: 0 0 auto;
++  margin-top: 0.1rem;
++  accent-color: #bd9251;
++}
++
++.consultation-acknowledgement input[aria-invalid="true"] {
++  outline: 2px solid #b66658;
++  outline-offset: 2px;
++}
++
++.consultation-panel .consultation-submit-row {
++  display: grid;
++  grid-template-columns: minmax(17rem, 26rem);
++  gap: 0.9rem;
++  margin: 0 0 0 calc(7.25rem + clamp(1.5rem, 3vw, 3rem));
++  padding-top: 1.5rem;
++  border-top: 1px solid #4b4339;
++}
++
++.consultation-panel .consultation-submit-row .button {
++  display: flex;
++  width: 100%;
++  min-height: 3.65rem;
++  justify-content: space-between;
++  padding-inline: 1.5rem;
++  border-color: #d3a963;
++  color: #17120c;
++  background: linear-gradient(90deg, #c6954e, #e2b96f);
++  font-family: var(--serif);
++  font-size: 0.9rem;
++  font-weight: 500;
++  letter-spacing: 0.1em;
++  text-transform: uppercase;
++}
++
++.consultation-panel .consultation-submit-row .button:hover:not(:disabled) {
++  background: linear-gradient(90deg, #d2a45c, #edc67b);
++}
++
++.consultation-panel .consultation-submit-row p {
++  color: #817a71;
++  font-family: var(--sans);
++  font-size: 0.65rem;
++}
++
++.consultation-panel .consultation-confirmation {
++  margin-top: 4rem;
++  border-color: #766347;
++  color: #e9dfd1;
++  background: rgb(10 9 8 / 62%);
++}
++
++.consultation-panel .consultation-confirmation h2 {
++  color: #f1e8da;
++}
++
++.consultation-panel .consultation-confirmation > p:last-child {
++  color: #a69e93;
++}
++
++@media (max-width: 980px) {
++  .consultation-split {
++    grid-template-columns: 1fr;
++  }
++
++  .consultation-sidebar {
++    min-height: 58rem;
++    padding: 3.5rem 1.5rem 23rem;
++    border-right: 0;
++    border-bottom: 0;
++  }
++
++  .consultation-sidebar-content {
++    max-width: 42rem;
++  }
++
++  .consultation-sidebar-brand {
++    margin-bottom: 4rem;
++  }
++
++  .consultation-sidebar-intro h1 {
++    max-width: 10ch;
++  }
++
++  .consultation-sidebar-art {
++    right: -5%;
++    width: 68%;
++    height: 25rem;
++  }
++
++  .consultation-panel::before {
++    top: -1px;
++    right: 0;
++    bottom: auto;
++    left: 0;
++    width: 100%;
++    height: 5rem;
++    background: var(--consultation-paper);
++    transform: scaleY(-1);
++    -webkit-mask: url("/charcoal-erosion-mask.svg") center / calc(100% + 2rem)
++      100% no-repeat;
++    mask: url("/charcoal-erosion-mask.svg") center / calc(100% + 2rem) 100%
++      no-repeat;
++  }
++
++  .consultation-panel-inner {
++    padding-top: 7rem;
++  }
++}
++
++@media (max-width: 700px) {
++  .consultation-panel-inner {
++    padding: 6rem 1rem 5rem;
++  }
++
++  .consultation-panel-heading h2 {
++    font-size: clamp(3.1rem, 13vw, 4.5rem);
++  }
++
++  .consultation-panel-art-lower {
++    right: -22%;
++    bottom: 9rem;
++    width: 128%;
++    height: 34rem;
++    opacity: 0.055;
++  }
++
++  .consultation-form-section {
++    grid-template-columns: 1fr;
++    gap: 1.2rem;
++    padding-block: 1.75rem;
++  }
++
++  .consultation-section-heading {
++    display: grid;
++    grid-template-columns: 3rem 1fr;
++    gap: 0.75rem;
++    align-items: end;
++  }
++
++  .consultation-section-heading > span {
++    margin: 0;
++  }
++
++  .consultation-section-heading p {
++    grid-column: 1 / -1;
++  }
++
++  .consultation-panel .consultation-submit-row {
++    margin-left: 0;
++  }
++}
++
++@media (max-width: 520px) {
++  .consultation-sidebar {
++    min-height: 62rem;
++    padding-inline: 1rem;
++  }
++
++  .consultation-sidebar-brand > span {
++    width: 3rem;
++  }
++
++  .consultation-sidebar-brand strong {
++    font-size: 1.35rem;
++  }
++
++  .consultation-sidebar-intro h1 {
++    font-size: 3.3rem;
++  }
++
++  .consultation-email-note {
++    margin-bottom: 3.5rem;
++  }
++
++  .consultation-sidebar-art {
++    right: 0;
++    width: 100%;
++  }
++
++  .consultation-section-fields {
++    grid-template-columns: 1fr;
++  }
++
++  .consultation-field-wide {
++    grid-column: auto;
++  }
++
++  .consultation-panel .consultation-upload {
++    min-height: 0;
++    padding: 1rem;
++  }
++
++  .consultation-panel .consultation-submit-row {
++    grid-template-columns: 1fr;
++  }
++
++  .consultation-panel .consultation-submit-row .button {
++    font-size: 0.78rem;
++  }
++}
++
++/* Homepage paper grain and two-sided subtractive charcoal boundaries */
++.drawings-band.paper,
++.specialties.paper,
++.process.paper {
++  background-color: var(--paper);
++  background-image:
++    url("/sketchbook-paper.svg"),
++    radial-gradient(
++      ellipse at 14% 18%,
++      rgb(255 251 241 / 42%),
++      transparent 35%
++    ),
++    radial-gradient(ellipse at 82% 72%, rgb(105 84 55 / 5%), transparent 42%),
++    linear-gradient(103deg, rgb(89 70 44 / 2.5%), transparent 28% 76%);
++  background-repeat: no-repeat;
++  background-position: center, center, center, center;
++  background-size: cover, cover, cover, cover;
++  background-blend-mode: multiply, normal, multiply, multiply;
++}
++
++.about-band::before,
++.info-band::before,
++.consult::before {
++  content: "";
++  position: absolute;
++  z-index: 4;
++  top: -1px;
++  right: 0;
++  left: 0;
++  width: 100%;
++  height: calc(clamp(3rem, 6vw, 8.75rem) + 1px);
++  pointer-events: none;
++  background: var(--paper);
++  transform: scale(-1, -1);
++  transform-origin: center;
++  -webkit-mask: url("/charcoal-erosion-mask.svg") center / calc(100% + 1rem)
++    100% no-repeat;
++  mask: url("/charcoal-erosion-mask.svg") center / calc(100% + 1rem) 100%
++    no-repeat;
++}
++
++.info-band {
++  padding-bottom: clamp(3.75rem, 5vw, 5.25rem);
++}
++
++.consult {
++  padding-top: clamp(5rem, 6vw, 6.5rem);
++}
++
++.info-band::before {
++  transform: scaleY(-1);
++}
++
++.info-band::after {
++  transform: scaleX(-1);
++}
++
++.consult::before {
++  transform: scaleY(-1);
++  -webkit-mask-size: calc(100% + 7rem) 100%;
++  mask-size: calc(100% + 7rem) 100%;
++}
++
++@media (max-width: 600px) {
++  .about-band::before,
++  .info-band::before,
++  .consult::before {
++    height: calc(5rem + 1px);
++  }
++}
++
++/* Consultation request */
++.consultation-hero {
++  display: grid;
++  grid-template-columns: minmax(18rem, 1.05fr) minmax(18rem, 0.95fr);
++  gap: clamp(3rem, 9vw, 9rem);
++  align-items: end;
++  min-height: 30rem;
++  padding: clamp(6rem, 10vw, 9rem) clamp(1rem, 5vw, 5rem) clamp(4rem, 7vw, 6rem);
++  border-bottom: 1px solid #4b4133;
++  background:
++    radial-gradient(circle at 76% 42%, rgb(120 91 54 / 14%), transparent 26rem),
++    linear-gradient(115deg, #0a0a09, #171512 64%, #0b0b0a);
++}
++.consultation-hero h1 {
++  max-width: 10ch;
++  margin: 0;
++  font-size: clamp(3.8rem, 7.5vw, 7.25rem);
++  line-height: 0.9;
++}
++.consultation-hero-copy {
++  max-width: 34rem;
++  padding-bottom: 0.35rem;
++  color: #c8c0b4;
++  font-family: var(--serif);
++  font-size: clamp(1rem, 1.5vw, 1.2rem);
++  line-height: 1.75;
++}
++.consultation-hero-copy p:last-child {
++  margin-bottom: 0;
++  color: #928a7f;
++  font-family: var(--sans);
++  font-size: 0.75rem;
++  letter-spacing: 0.04em;
++}
++.consultation-paper {
++  position: relative;
++  padding: clamp(4rem, 7vw, 7rem) clamp(1rem, 5vw, 5rem)
++    clamp(6rem, 10vw, 10rem);
++  background:
++    radial-gradient(circle at 9% 12%, rgb(131 105 66 / 7%), transparent 25rem),
++    radial-gradient(circle at 86% 64%, rgb(91 72 45 / 4%), transparent 30rem),
++    linear-gradient(
++      102deg,
++      rgb(255 255 255 / 12%),
++      transparent 28% 72%,
++      rgb(75 57 34 / 3%)
++    ),
++    var(--paper);
++}
++.consultation-paper::before {
++  content: "";
++  position: absolute;
++  inset: 0;
++  pointer-events: none;
++  opacity: 0.14;
++  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.55' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.12'/%3E%3C/svg%3E");
++  mix-blend-mode: multiply;
++}
++.consultation-form,
++.consultation-confirmation {
++  position: relative;
++  z-index: 1;
++  max-width: 78rem;
++  margin-inline: auto;
++}
++.consultation-form-heading {
++  display: grid;
++  grid-template-columns: minmax(18rem, 1.1fr) minmax(16rem, 0.9fr);
++  gap: clamp(2rem, 7vw, 7rem);
++  align-items: end;
++  margin-bottom: clamp(3rem, 6vw, 5rem);
++  padding-bottom: clamp(2rem, 4vw, 3rem);
++  border-bottom: 1px solid #aa9d89;
++}
++.consultation-form-heading h2 {
++  max-width: 13ch;
++  margin: 0.4rem 0 0;
++  color: #181512;
++  font-size: clamp(2.5rem, 5vw, 4.8rem);
++  line-height: 0.98;
++}
++.consultation-form-heading > p {
++  max-width: 32rem;
++  margin: 0;
++  color: #5e574d;
++  font-family: var(--serif);
++  line-height: 1.75;
++}
++.consultation-form-message {
++  margin: 0 0 2rem;
++  padding: 1rem 1.1rem;
++  border-left: 2px solid #8d4339;
++  color: #662c25;
++  background: rgb(133 61 51 / 7%);
++  font-size: 0.86rem;
++}
++.consultation-fields {
++  display: grid;
++  grid-template-columns: repeat(2, minmax(0, 1fr));
++  gap: 2rem clamp(1.5rem, 5vw, 4.5rem);
++}
++.consultation-field {
++  display: grid;
++  min-width: 0;
++  align-content: start;
++  gap: 0.55rem;
++  color: #27221c;
++  font-size: 0.75rem;
++  font-weight: 750;
++  letter-spacing: 0.07em;
++  text-transform: uppercase;
++}
++.consultation-field-wide {
++  grid-column: 1 / -1;
++}
++.consultation-field > span,
++.consultation-upload label > span {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: baseline;
++  justify-content: space-between;
++  gap: 0.5rem 1rem;
++}
++.consultation-field b,
++.consultation-field em {
++  color: #766348;
++  font-size: 0.56rem;
++  font-style: normal;
++  font-weight: 750;
++  letter-spacing: 0.12em;
++  text-transform: uppercase;
++}
++.consultation-field em {
++  color: #7b7367;
++}
++.consultation-field small,
++.consultation-upload label small {
++  max-width: 48rem;
++  color: #6d655a;
++  font-family: var(--serif);
++  font-size: 0.82rem;
++  font-weight: 400;
++  letter-spacing: 0;
++  line-height: 1.55;
++  text-transform: none;
++}
++.consultation-field input,
++.consultation-field select,
++.consultation-field textarea {
++  width: 100%;
++  min-height: 3.3rem;
++  padding: 0.8rem 0.9rem;
++  border: 1px solid #9f927e;
++  border-radius: 0;
++  outline: none;
++  color: #1f1a15;
++  background: rgb(248 243 233 / 64%);
++  font: 400 1rem/1.45 var(--sans);
++  letter-spacing: normal;
++  text-transform: none;
++  transition:
++    border-color 150ms ease,
++    box-shadow 150ms ease,
++    background-color 150ms ease;
++}
++.consultation-field textarea {
++  min-height: 8rem;
++  resize: vertical;
++}
++.consultation-field input::placeholder,
++.consultation-field textarea::placeholder {
++  color: #857d72;
++  opacity: 1;
++}
++.consultation-field input:focus-visible,
++.consultation-field select:focus-visible,
++.consultation-field textarea:focus-visible {
++  border-color: #705933;
++  background: rgb(255 252 244 / 82%);
++  box-shadow: 0 0 0 3px rgb(137 108 63 / 18%);
++}
++.consultation-field input[aria-invalid="true"],
++.consultation-field select[aria-invalid="true"],
++.consultation-field textarea[aria-invalid="true"] {
++  border-color: #8d4339;
++}
++.consultation-field-error {
++  color: #7f322a;
++  font-size: 0.72rem;
++  font-weight: 650;
++  letter-spacing: 0;
++  text-transform: none;
++}
++.consultation-upload {
++  padding: clamp(1.25rem, 3vw, 2rem);
++  border: 1px solid #a99c87;
++  background: rgb(247 240 228 / 45%);
++}
++.consultation-upload > label {
++  display: grid;
++  gap: 0.55rem;
++}
++.consultation-upload input[type="file"] {
++  min-height: auto;
++  padding: 0.7rem;
++  color: #5c544a;
++  background: rgb(255 252 244 / 55%);
++  font-size: 0.78rem;
++}
++.consultation-upload input[type="file"]::file-selector-button {
++  min-height: 2.6rem;
++  margin-right: 0.9rem;
++  padding: 0.55rem 0.85rem;
++  border: 1px solid #7a684c;
++  color: #2a231a;
++  background: transparent;
++  font: 750 0.65rem var(--sans);
++  letter-spacing: 0.09em;
++  text-transform: uppercase;
++  cursor: pointer;
++}
++.consultation-previews {
++  display: grid;
++  grid-template-columns: repeat(auto-fill, minmax(8rem, 1fr));
++  gap: 0.8rem;
++  margin-top: 0.6rem;
++}
++.consultation-previews.single {
++  grid-template-columns: minmax(8rem, 12rem);
++}
++.consultation-previews figure {
++  position: relative;
++  min-width: 0;
++  min-height: 10rem;
++  margin: 0;
++  overflow: hidden;
++  border: 1px solid #8d806d;
++  background: #d6cdbf;
++}
++.consultation-previews img {
++  width: 100%;
++  height: 100%;
++  object-fit: cover;
++}
++.consultation-previews figcaption {
++  position: absolute;
++  inset: auto 0 0;
++  overflow: hidden;
++  padding: 1.8rem 0.55rem 0.45rem;
++  color: white;
++  background: linear-gradient(transparent, rgb(10 9 8 / 86%));
++  font-size: 0.58rem;
++  letter-spacing: 0.04em;
++  text-overflow: ellipsis;
++  text-transform: none;
++  white-space: nowrap;
++}
++.consultation-previews button {
++  position: absolute;
++  top: 0.4rem;
++  right: 0.4rem;
++  z-index: 1;
++  min-height: 2.75rem;
++  padding: 0.4rem 0.55rem;
++  border: 1px solid rgb(255 255 255 / 58%);
++  color: white;
++  background: rgb(12 11 10 / 82%);
++  font: 700 0.57rem var(--sans);
++  letter-spacing: 0.08em;
++  text-transform: uppercase;
++  cursor: pointer;
++}
++.consultation-honeypot {
++  position: absolute;
++  left: -10000px;
++  width: 1px;
++  height: 1px;
++  overflow: hidden;
++}
++.consultation-submit-row {
++  display: flex;
++  align-items: center;
++  gap: 1.5rem;
++  margin-top: clamp(2.5rem, 5vw, 4rem);
++  padding-top: 2rem;
++  border-top: 1px solid #aa9d89;
++}
++.consultation-submit-row .button {
++  flex: 0 0 auto;
++}
++.consultation-submit-row p {
++  max-width: 34rem;
++  margin: 0;
++  color: #625a50;
++  font-family: var(--serif);
++  font-size: 0.82rem;
++}
++.consultation-confirmation {
++  max-width: 50rem;
++  padding: clamp(3rem, 7vw, 6rem);
++  border: 1px solid #9c8e78;
++  color: #27211a;
++  background: rgb(250 245 235 / 62%);
++}
++.consultation-confirmation h2 {
++  max-width: 14ch;
++  margin: 0.6rem 0 1.25rem;
++  font-size: clamp(2.5rem, 5vw, 4.5rem);
++}
++.consultation-confirmation > p:last-child {
++  max-width: 38rem;
++  color: #60584d;
++  font-family: var(--serif);
++  line-height: 1.75;
++}
++
++@media (max-width: 760px) {
++  .consultation-hero,
++  .consultation-form-heading,
++  .consultation-fields {
++    grid-template-columns: 1fr;
++  }
++  .consultation-hero {
++    min-height: auto;
++    gap: 2rem;
++    padding: 4rem 1rem;
++  }
++  .consultation-hero h1 {
++    font-size: clamp(3.4rem, 16vw, 5rem);
++  }
++  .consultation-paper {
++    padding: 3.5rem 1rem 5rem;
++  }
++  .consultation-form-heading {
++    gap: 1.5rem;
++    margin-bottom: 2.5rem;
++  }
++  .consultation-field-wide {
++    grid-column: auto;
++  }
++  .consultation-submit-row {
++    align-items: stretch;
++    flex-direction: column;
++  }
++  .consultation-submit-row .button {
++    width: 100%;
++    min-height: 3.25rem;
++  }
++}
++
++@media (max-width: 420px) {
++  .consultation-previews {
++    grid-template-columns: repeat(2, minmax(0, 1fr));
++  }
++  .consultation-upload {
++    padding: 1rem;
++  }
++  .consultation-upload input[type="file"]::file-selector-button {
++    display: block;
++    width: 100%;
++    margin: 0 0 0.65rem;
++  }
++}
++
++/* Four-slot hero and focused portfolio administration */
++.hero-artworks {
++  grid-template-columns: repeat(4, minmax(0, 1fr));
++}
++.hero-artworks[data-count="3"] {
++  grid-template-columns: repeat(3, minmax(0, 1fr));
++}
++.hero-artworks[data-count="2"] {
++  grid-template-columns: repeat(2, minmax(0, 1fr));
++  max-width: 35rem;
++}
++.hero-artworks[data-count="1"] {
++  grid-template-columns: minmax(12rem, 17rem);
++}
++.hero-without-artworks {
++  grid-template-columns: minmax(0, 34rem);
++}
++
++.admin-intro {
++  max-width: 42rem;
++  color: #5f594f;
++  font-family: var(--serif);
++}
++.bulk-upload-form {
++  display: grid;
++  gap: 1.5rem;
++  margin-top: 2.5rem;
++}
++.bulk-upload-controls {
++  display: grid;
++  grid-template-columns: minmax(12rem, 0.45fr) minmax(18rem, 1.55fr);
++  gap: 1.25rem;
++  max-width: 58rem;
++}
++.bulk-upload-controls label,
++.bulk-preview-fields label,
++.placement-form label {
++  display: grid;
++  gap: 0.45rem;
++  font-weight: 700;
++}
++.bulk-upload-controls label > span {
++  color: #6d675e;
++  font-size: 0.82rem;
++  font-weight: 400;
++}
++.bulk-upload-controls input,
++.bulk-upload-controls select,
++.bulk-preview-fields input,
++.placement-form select {
++  width: 100%;
++  min-height: 3rem;
++  padding: 0.75rem;
++  border: 1px solid #bcb3a5;
++  border-radius: 0;
++  background: #fff;
++  font: inherit;
++}
++.bulk-upload-summary {
++  margin: 0;
++  color: #625b51;
++  font-size: 0.82rem;
++}
++.bulk-preview-list {
++  display: grid;
++  gap: 1rem;
++  max-width: 70rem;
++}
++.bulk-preview-card {
++  display: grid;
++  grid-template-columns: 9rem minmax(0, 1fr) auto;
++  gap: 1.25rem;
++  align-items: start;
++  padding: 1rem;
++  border: 1px solid #bcb3a5;
++  background: rgb(255 255 255 / 52%);
++}
++.bulk-preview-image {
++  position: relative;
++  min-height: 11rem;
++  overflow: hidden;
++  background: #d3cabc;
++}
++.bulk-preview-image img {
++  object-fit: contain;
++}
++.bulk-preview-fields {
++  display: grid;
++  gap: 0.9rem;
++}
++.bulk-filename {
++  margin: 0;
++  color: #6d675e;
++  font-size: 0.72rem;
++  overflow-wrap: anywhere;
++}
++.bulk-file-state {
++  margin: 0;
++  font-size: 0.75rem;
++}
++.bulk-file-state.uploading {
++  color: #71572d;
++}
++.bulk-file-state.success {
++  color: #356047;
++}
++.bulk-file-state.error {
++  color: #8a3e32;
++}
++.bulk-remove {
++  min-height: 2.75rem;
++}
++.bulk-upload-form > .button {
++  margin-top: 0.5rem;
++}
++.bulk-upload-note {
++  max-width: 42rem;
++  color: #6d675e;
++  font-size: 0.78rem;
++}
++
++.admin-portfolio-row {
++  display: grid;
++  grid-template-columns: minmax(16rem, 0.8fr) minmax(24rem, 1.2fr);
++  align-items: start;
++}
++.admin-item-summary h3 {
++  overflow-wrap: anywhere;
++}
++.surface-statuses {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 0.75rem 1.75rem;
++  margin: 1rem 0;
++}
++.surface-statuses div {
++  display: grid;
++  gap: 0.1rem;
++}
++.surface-statuses dt {
++  color: #71695e;
++  font-size: 0.62rem;
++  font-weight: 800;
++  letter-spacing: 0.12em;
++  text-transform: uppercase;
++}
++.surface-statuses dd {
++  margin: 0;
++  font-family: var(--serif);
++}
++.admin-item-controls {
++  display: grid;
++  justify-items: end;
++  gap: 0.8rem;
++}
++.placement-form {
++  display: grid;
++  grid-template-columns: minmax(9rem, 1fr) minmax(9rem, 0.75fr) auto;
++  gap: 0.75rem;
++  align-items: end;
++  width: 100%;
++}
++.placement-checkbox {
++  display: flex !important;
++  min-height: 3rem;
++  align-items: center;
++  gap: 0.55rem !important;
++  padding: 0.75rem;
++  border: 1px solid #bcb3a5;
++  background: #fff;
++}
++.placement-checkbox input {
++  width: auto;
++}
++.placement-form .button {
++  min-height: 3rem;
++}
++.danger-text-button {
++  color: #803b32;
++}
++
++@media (max-width: 900px) {
++  .hero-artworks,
++  .hero-artworks[data-count="1"],
++  .hero-artworks[data-count="2"],
++  .hero-artworks[data-count="3"] {
++    grid-auto-columns: minmax(15rem, 38%);
++    grid-template-columns: none;
++    grid-auto-flow: column;
++    max-width: none;
++    overflow-x: auto;
++    overscroll-behavior-inline: contain;
++    scroll-snap-type: inline mandatory;
++    scrollbar-color: var(--gold) #28241f;
++  }
++  .hero-art-card {
++    scroll-snap-align: start;
++  }
++  .admin-portfolio-row {
++    grid-template-columns: 1fr;
++  }
++  .admin-item-controls {
++    justify-items: stretch;
++  }
++}
++
++@media (max-width: 720px) {
++  .bulk-upload-controls,
++  .placement-form {
++    grid-template-columns: 1fr;
++  }
++  .bulk-preview-card {
++    grid-template-columns: 6rem minmax(0, 1fr);
++  }
++  .bulk-preview-image {
++    min-height: 8rem;
++  }
++  .bulk-remove {
++    grid-column: 1 / -1;
++    justify-self: start;
++  }
++}
++
++@media (max-width: 600px) {
++  .hero-artworks,
++  .hero-artworks[data-count="1"],
++  .hero-artworks[data-count="2"],
++  .hero-artworks[data-count="3"] {
++    grid-auto-columns: 70%;
++  }
++  .bulk-preview-card {
++    grid-template-columns: 1fr;
++  }
++  .bulk-preview-image {
++    min-height: 15rem;
++  }
++  .bulk-remove {
++    grid-column: auto;
++  }
++  .admin-portfolio-row {
++    gap: 1.5rem;
++  }
++}
++
++/* Supporting pages and expanded site footer */
++.support-page {
++  min-height: calc(100vh - 4rem);
++  padding: clamp(4.5rem, 7vw, 7rem) clamp(1rem, 5vw, 5rem)
++    clamp(6rem, 10vw, 10rem);
++}
++.support-hero {
++  max-width: 58rem;
++  margin-bottom: clamp(4rem, 7vw, 7rem);
++}
++.support-hero h1 {
++  max-width: 12ch;
++  margin-bottom: 1.5rem;
++  font-size: clamp(3.5rem, 7vw, 7rem);
++}
++.support-lede {
++  max-width: 40rem;
++  margin-bottom: 0;
++  color: #bbb3a7;
++  font-family: var(--serif);
++  font-size: clamp(1rem, 1.6vw, 1.2rem);
++}
++.support-hero-light .support-lede {
++  color: #625b51;
++}
++
++.about-page {
++  overflow: clip;
++  background:
++    radial-gradient(
++      circle at 80% 12%,
++      rgb(151 124 82 / 10%),
++      transparent 26rem
++    ),
++    #0d0d0c;
++}
++.about-page-grid {
++  display: grid;
++  grid-template-columns: minmax(18rem, 0.88fr) minmax(22rem, 1.12fr);
++  max-width: 86rem;
++  border-block: 1px solid var(--line);
++  background: linear-gradient(105deg, rgb(255 255 255 / 2%), transparent 48%);
++}
++.about-page-portrait {
++  position: relative;
++  min-height: clamp(30rem, 48vw, 44rem);
++  margin: 0;
++  overflow: hidden;
++  border-right: 1px solid var(--line);
++  background: #22201d;
++}
++.about-page-portrait img {
++  position: absolute;
++  inset: 0;
++  width: 100%;
++  height: 100%;
++  object-fit: cover;
++  filter: grayscale(1) contrast(1.04) brightness(0.78);
++  transform: scale(2.25);
++  transform-origin: 50% 64%;
++}
++.about-page-portrait::after {
++  content: "";
++  position: absolute;
++  inset: 0;
++  background: linear-gradient(180deg, transparent 58%, rgb(8 8 8 / 38%));
++  pointer-events: none;
++}
++.about-page-details {
++  display: grid;
++  align-content: center;
++  padding: clamp(2.5rem, 5.5vw, 5.5rem);
++}
++.about-page-statement {
++  max-width: 39rem;
++}
++.about-page-statement h2 {
++  max-width: 12ch;
++  margin-bottom: 1.25rem;
++  font-size: clamp(2.3rem, 4vw, 4.3rem);
++}
++.about-page-statement > p:last-child {
++  max-width: 34rem;
++  color: #b9b1a5;
++  font-family: var(--serif);
++  line-height: 1.75;
++}
++.about-page-values {
++  display: grid;
++  grid-template-columns: repeat(3, minmax(0, 1fr));
++  margin: clamp(2.5rem, 5vw, 4.5rem) 0 0;
++  padding: 0;
++  border-top: 1px solid var(--line);
++  list-style: none;
++}
++.about-page-values li {
++  padding: 1.4rem 1.25rem 0 0;
++  color: var(--gold);
++}
++.about-page-values strong {
++  display: block;
++  margin-top: 0.6rem;
++  color: #e9dfd0;
++  font-family: var(--serif);
++  font-size: 0.75rem;
++  font-weight: 400;
++  letter-spacing: 0.06em;
++  text-transform: uppercase;
++}
++.about-page-values p {
++  margin: 0.3rem 0 0;
++  color: #aaa297;
++  font-size: 0.72rem;
++}
++
++.faq-page {
++  background:
++    radial-gradient(circle at 12% 8%, rgb(96 76 49 / 8%), transparent 24rem),
++    repeating-linear-gradient(
++      90deg,
++      transparent 0 9rem,
++      rgb(89 75 55 / 2.5%) 9rem 9.05rem
++    ),
++    var(--paper);
++}
++.faq-page-grid {
++  display: grid;
++  grid-template-columns: minmax(14rem, 0.62fr) minmax(22rem, 1.38fr);
++  gap: clamp(3rem, 8vw, 8rem);
++  max-width: 82rem;
++  padding-block: clamp(3rem, 5vw, 5rem) clamp(2rem, 4vw, 4rem);
++  border-top: 1px solid var(--paper-line);
++  border-bottom: 1px solid var(--paper-line);
++}
++.faq-page-intro {
++  max-width: 25rem;
++}
++.faq-page-intro h2 {
++  margin-bottom: 1rem;
++  font-size: clamp(2rem, 3.3vw, 3.25rem);
++}
++.faq-page-intro > p:last-child {
++  color: #625b51;
++  font-family: var(--serif);
++  font-size: 0.9rem;
++}
++.faq-list {
++  border-top: 1px solid #a99d8b;
++}
++.faq-list details {
++  border-bottom: 1px solid #a99d8b;
++  transition: background-color 180ms ease;
++}
++.faq-list details[open] {
++  background: rgb(123 96 57 / 4%);
++}
++.faq-list summary {
++  display: flex;
++  min-height: 5.25rem;
++  align-items: center;
++  justify-content: space-between;
++  gap: 1.5rem;
++  padding: 1.15rem 0.85rem;
++  color: #201d19;
++  font-family: var(--serif);
++  font-size: clamp(1.15rem, 2vw, 1.55rem);
++  cursor: pointer;
++  list-style: none;
++}
++.faq-list summary::-webkit-details-marker {
++  display: none;
++}
++.faq-list summary:hover {
++  color: #725c38;
++}
++.faq-toggle {
++  position: relative;
++  flex: 0 0 1.75rem;
++  width: 1.75rem;
++  height: 1.75rem;
++  border: 1px solid #87775e;
++  border-radius: 50%;
++}
++.faq-toggle::before,
++.faq-toggle::after {
++  content: "";
++  position: absolute;
++  top: 50%;
++  left: 50%;
++  width: 0.65rem;
++  border-top: 1px solid currentColor;
++  transform: translate(-50%, -50%);
++}
++.faq-toggle::after {
++  transform: translate(-50%, -50%) rotate(90deg);
++  transition: transform 160ms ease;
++}
++.faq-list details[open] .faq-toggle::after {
++  transform: translate(-50%, -50%) rotate(0deg);
++}
++.faq-answer {
++  max-width: 39rem;
++  padding: 0 3.5rem 1.75rem 0.85rem;
++  color: #625b51;
++  font-family: var(--serif);
++  font-size: 0.93rem;
++  line-height: 1.8;
++}
++.faq-answer p {
++  margin: 0;
++}
++
++.info-band .quiet-link {
++  color: #d8cdbd;
++  text-decoration: none;
++}
++.info-band .quiet-link:hover {
++  color: var(--gold);
++}
++
++.site-footer {
++  display: grid;
++  grid-template-columns: minmax(24rem, 1.05fr) minmax(28rem, 0.95fr);
++  gap: clamp(4rem, 8vw, 8rem);
++  align-items: stretch;
++  padding: clamp(4rem, 6vw, 6rem) clamp(1rem, 5vw, 5rem);
++  font-size: 0.66rem;
++  letter-spacing: 0.1em;
++  text-transform: uppercase;
++}
++.footer-newsletter {
++  display: flex;
++  max-width: 42rem;
++  flex-direction: column;
++  justify-content: center;
++  padding-right: clamp(1rem, 4vw, 4rem);
++  border-right: 1px solid var(--line);
++}
++.footer-newsletter h2 {
++  max-width: 12ch;
++  margin-bottom: 1rem;
++  color: #eee4d5;
++  font-size: clamp(2.25rem, 3.8vw, 3.8rem);
++  text-transform: none;
++}
++.footer-newsletter-copy {
++  max-width: 34rem;
++  margin-bottom: clamp(1.75rem, 3vw, 2.5rem);
++  color: #aaa298;
++  font-family: var(--serif);
++  font-size: 0.85rem;
++  letter-spacing: normal;
++  line-height: 1.7;
++  text-transform: none;
++}
++.site-footer .newsletter-form {
++  max-width: 38rem;
++}
++.site-footer .newsletter-form > label {
++  color: #c2b7a7;
++}
++.site-footer .newsletter-controls {
++  border-bottom-color: #746a5c;
++}
++.site-footer .newsletter-controls input {
++  color: #f0e7da;
++}
++.site-footer .newsletter-controls input::placeholder {
++  color: #777066;
++}
++.site-footer .newsletter-controls input[aria-invalid="true"] {
++  color: #e4a89e;
++}
++.site-footer .newsletter-submit {
++  border: 1px solid var(--gold);
++  color: #f2eadf;
++  background: transparent;
++}
++.site-footer .newsletter-submit:hover:not(:disabled) {
++  color: #11100e;
++  background: var(--gold);
++}
++.site-footer .newsletter-message {
++  color: #8f877c;
++  letter-spacing: 0.03em;
++  text-transform: none;
++}
++.site-footer .newsletter-message.error {
++  color: #e4a89e;
++}
++.site-footer .newsletter-message.success {
++  color: #a7c2ad;
++}
++.footer-directory {
++  display: flex;
++  min-width: 0;
++  flex-direction: column;
++  justify-content: space-between;
++}
++.footer-summary {
++  max-width: 32rem;
++  padding-bottom: clamp(2.5rem, 5vw, 5rem);
++}
++.footer-wordmark {
++  display: inline-block;
++  margin-bottom: 1.25rem;
++  color: #eee4d5;
++  font-size: clamp(1.25rem, 2vw, 1.65rem);
++  text-decoration: none;
++}
++.footer-summary p {
++  margin: 0.25rem 0 0;
++}
++.footer-navs {
++  display: grid;
++  grid-template-columns: repeat(3, minmax(0, 1fr));
++  gap: clamp(2rem, 4vw, 4rem);
++  padding-top: clamp(2rem, 3vw, 3rem);
++  border-top: 1px solid var(--line);
++}
++.site-footer .footer-navs nav {
++  display: flex;
++  flex-direction: column;
++  align-items: flex-start;
++  gap: 0.65rem;
++}
++.site-footer .footer-navs h2 {
++  margin: 0 0 0.5rem;
++  color: var(--gold);
++  font-family: var(--sans);
++  font-size: 0.61rem;
++  font-weight: 800;
++  letter-spacing: 0.14em;
++  text-transform: uppercase;
++}
++.site-footer .footer-navs a {
++  color: #cfc6b9;
++  font-size: 0.68rem;
++  letter-spacing: 0.09em;
++  text-decoration: none;
++}
++.site-footer .footer-navs a:hover {
++  color: #f0e7da;
++}
++
++@media (max-width: 980px) {
++  .about-page-grid,
++  .faq-page-grid,
++  .site-footer {
++    grid-template-columns: 1fr;
++  }
++  .footer-newsletter {
++    max-width: none;
++    padding: 0 0 clamp(3rem, 6vw, 5rem);
++    border-right: 0;
++    border-bottom: 1px solid var(--line);
++  }
++  .footer-directory {
++    gap: 1rem;
++  }
++  .footer-summary {
++    padding-bottom: 2rem;
++  }
++}
++
++@media (max-width: 800px) {
++  .about-page-portrait {
++    min-height: clamp(24rem, 105vw, 36rem);
++    border-right: 0;
++    border-bottom: 1px solid var(--line);
++  }
++  .about-page-values {
++    grid-template-columns: 1fr;
++  }
++  .about-page-values li {
++    display: grid;
++    grid-template-columns: 1.5rem 1fr;
++    gap: 0.75rem;
++    padding: 1rem 0;
++    border-bottom: 1px solid var(--line);
++  }
++  .about-page-values li:last-child {
++    border-bottom: 0;
++  }
++  .about-page-values strong {
++    margin-top: 0;
++  }
++  .faq-page-grid {
++    gap: 2.5rem;
++  }
++  .site-footer {
++    gap: 3rem;
++  }
++}
++
++@media (max-width: 480px) {
++  .support-page {
++    padding-top: 3.25rem;
++    padding-bottom: 4.5rem;
++  }
++  .support-hero {
++    margin-bottom: 3.5rem;
++  }
++  .support-hero h1 {
++    font-size: clamp(3.15rem, 16vw, 4.2rem);
++  }
++  .about-page-details {
++    padding-inline: 1rem;
++  }
++  .about-page-statement h2 {
++    font-size: 2.5rem;
++  }
++  .faq-list summary {
++    min-height: 4.25rem;
++    font-size: 1.1rem;
++  }
++  .site-footer {
++    padding-block: 3.5rem;
++  }
++  .site-footer .newsletter-controls {
++    gap: 0.75rem;
++    border-bottom: 0;
++  }
++  .site-footer .newsletter-controls input {
++    min-height: 3rem;
++    padding-inline: 0.75rem;
++    border: 1px solid #746a5c;
++  }
++  .site-footer .newsletter-submit {
++    width: 100%;
++    min-height: 3rem;
++  }
++  .footer-navs {
++    grid-template-columns: 1fr;
++    gap: 1.25rem;
++  }
++  .site-footer .footer-navs nav {
++    gap: 0;
++    padding-bottom: 1.25rem;
++    border-bottom: 1px solid var(--line);
++  }
++  .site-footer .footer-navs nav:last-child {
++    padding-bottom: 0;
++    border-bottom: 0;
++  }
++  .site-footer .footer-navs h2 {
++    margin-bottom: 0.45rem;
++  }
++  .site-footer .footer-navs a {
++    display: flex;
++    width: 100%;
++    min-height: 2.75rem;
++    align-items: center;
++  }
++}
+diff --git a/app/layout.tsx b/app/layout.tsx
+index 95158f7..e8d4610 100644
+--- a/app/layout.tsx
++++ b/app/layout.tsx
+@@ -1,5 +1,7 @@
+ import type { Metadata } from "next";
++import Image from "next/image";
+ import Link from "next/link";
++import { NewsletterSignup } from "@/components/newsletter-signup";
+ import "./globals.css";
+ 
+ export const metadata: Metadata = {
+@@ -20,24 +22,64 @@ export default function RootLayout({
+         <header className="site-header">
+           <Link className="brand-lockup" href="/">
+             <span className="brand-seal" aria-hidden="true">
+-              M
++              <Image
++                src="/client-media/mgm-bird-logo.jpg"
++                alt=""
++                width={256}
++                height={256}
++                priority
++                sizes="48px"
++              />
+             </span>
+             <span className="wordmark">MGM.TATZ</span>
+           </Link>
+           <nav aria-label="Primary">
+-            <Link href="/work">Work</Link>
+-            <Link href="/#drawings">Drawings</Link>
+-            <Link href="/#about">About</Link>
+-            <Link href="/#process">Process</Link>
+-            <Link href="/#faq">FAQ</Link>
+-            <Link href="/#consult">Consultation</Link>
++            <Link href="/work">Gallery</Link>
++            <Link href="/about">About Me</Link>
++            <Link href="/faq">FAQ</Link>
++            <Link href="/consultation">Consultation</Link>
+           </nav>
+         </header>
+         <main id="main-content">{children}</main>
+         <footer className="site-footer">
+-          <span className="footer-wordmark">MGM.TATZ</span>
+-          <span>Solo artist · Chicago, Illinois</span>
+-          <span>Social links forthcoming</span>
++          <div
++            className="footer-newsletter"
++            aria-labelledby="footer-newsletter-heading"
++          >
++            <p className="kicker">Studio notes</p>
++            <h2 id="footer-newsletter-heading">First look, occasionally.</h2>
++            <p className="footer-newsletter-copy">
++              Promotions, availability updates, flash drops, and artist
++              news—sent only when there is something worth sharing.
++            </p>
++            <NewsletterSignup />
++          </div>
++
++          <div className="footer-directory">
++            <div className="footer-summary">
++              <Link className="footer-wordmark" href="/">
++                MGM.TATZ
++              </Link>
++              <p>Solo artist · Chicago, Illinois</p>
++            </div>
++            <div className="footer-navs">
++              <nav aria-labelledby="footer-studio-heading">
++                <h2 id="footer-studio-heading">Studio</h2>
++                <Link href="/about">About</Link>
++                <Link href="/work">Work</Link>
++              </nav>
++              <nav aria-labelledby="footer-explore-heading">
++                <h2 id="footer-explore-heading">Explore</h2>
++                <Link href="/faq">FAQ</Link>
++                <Link href="/#drawings">Drawings</Link>
++              </nav>
++              <nav aria-labelledby="footer-plan-heading">
++                <h2 id="footer-plan-heading">Plan</h2>
++                <Link href="/#process">Process</Link>
++                <Link href="/consultation">Consultation</Link>
++              </nav>
++            </div>
++          </div>
+         </footer>
+       </body>
+     </html>
+diff --git a/app/page.tsx b/app/page.tsx
+index fe2d918..1bb9ada 100644
+--- a/app/page.tsx
++++ b/app/page.tsx
+@@ -1,16 +1,48 @@
+ import Image from "next/image";
++import Link from "next/link";
+ import {
+   developmentDrawings,
+   developmentHeroTattoos,
+   milesPortrait,
+ } from "@/content/development-media";
++import { aboutContent } from "@/content/site-content";
++import { getSupabaseEnvironment } from "@/lib/env";
++import { publicMediaUrl } from "@/lib/portfolio";
++import { getHomepagePortfolioItems } from "@/lib/queries";
+ 
+ export const dynamic = "force-dynamic";
+ 
+-export default function HomePage() {
++export default async function HomePage() {
++  const { items: storedHeroItems, configured } =
++    await getHomepagePortfolioItems();
++  const supabaseEnvironment = configured ? getSupabaseEnvironment() : null;
++  const heroItems = configured
++    ? storedHeroItems.flatMap((item) => {
++        const media = item.portfolio_media[0];
++        if (!media) return [];
++        return [
++          {
++            id: item.id,
++            src: publicMediaUrl(
++              supabaseEnvironment!.url,
++              media.storage_bucket,
++              media.storage_key,
++            ),
++            alt: media.alt_text,
++            width: media.width ?? 1200,
++            height: media.height ?? 1500,
++            title: item.title,
++            objectPosition: undefined,
++          },
++        ];
++      })
++    : developmentHeroTattoos.map((item) => ({ id: item.src, ...item }));
++
+   return (
+     <>
+-      <section className="hero dark">
++      <section
++        className={`hero dark${heroItems.length ? "" : " hero-without-artworks"}`}
++      >
+         <div className="hero-copy">
+           <p className="kicker">Solo artist</p>
+           <h1>Miles</h1>
+@@ -18,33 +50,39 @@ export default function HomePage() {
+           <div className="ornament-rule" aria-hidden="true">
+             <span>✦</span>
+           </div>
+-          <p className="lede">
+-            Illustrative black-and-grey tattoo work shaped by myth, symbolism,
+-            nature, and the human experience.
+-          </p>
+-          <a className="button" href="#consult">
++          <p className="lede">{aboutContent.introduction}</p>
++          <Link className="button" href="/consultation">
+             Book a consultation <span aria-hidden="true">✦</span>
+-          </a>
++          </Link>
+           <p className="location-line">
+             <span aria-hidden="true">◇</span> Chicago, Illinois
+           </p>
+         </div>
+-        <div className="hero-artworks" aria-label="Selected tattoo work">
+-          {developmentHeroTattoos.map((item, index) => (
+-            <figure className={`hero-art-card art-${index + 1}`} key={item.src}>
+-              <Image
+-                src={item.src}
+-                alt={item.alt}
+-                width={item.width}
+-                height={item.height}
+-                priority
+-                sizes="(max-width: 600px) 50vw, (max-width: 900px) 33vw, 24vw"
+-                style={{ objectPosition: item.objectPosition }}
+-              />
+-              <figcaption>{item.title}</figcaption>
+-            </figure>
+-          ))}
+-        </div>
++        {heroItems.length ? (
++          <div
++            className="hero-artworks"
++            data-count={heroItems.length}
++            aria-label="Selected tattoo work"
++          >
++            {heroItems.map((item, index) => (
++              <figure
++                className={`hero-art-card art-${index + 1}`}
++                key={item.id}
++              >
++                <Image
++                  src={item.src}
++                  alt={item.alt}
++                  width={item.width}
++                  height={item.height}
++                  priority
++                  sizes="(max-width: 600px) 70vw, (max-width: 900px) 38vw, 18vw"
++                  style={{ objectPosition: item.objectPosition }}
++                />
++                <figcaption>{item.title}</figcaption>
++              </figure>
++            ))}
++          </div>
++        ) : null}
+       </section>
+       <section className="drawings-band paper" id="drawings">
+         <div className="drawings-intro">
+@@ -96,33 +134,18 @@ export default function HomePage() {
+             <br />
+             Stories that last.
+           </h2>
+-          <p>
+-            Artist biography and studio details are pending client approval.
+-            This space is reserved without inventing experience or claims.
+-          </p>
++          <p>{aboutContent.biography}</p>
+         </div>
+         <ul className="value-list">
+-          <li>
+-            <span aria-hidden="true">✦</span>
+-            <div>
+-              <strong>Personal process</strong>
+-              <p>Project approach forthcoming.</p>
+-            </div>
+-          </li>
+-          <li>
+-            <span aria-hidden="true">◇</span>
+-            <div>
+-              <strong>Intentional practice</strong>
+-              <p>Artist statement forthcoming.</p>
+-            </div>
+-          </li>
+-          <li>
+-            <span aria-hidden="true">◌</span>
+-            <div>
+-              <strong>Quality first</strong>
+-              <p>Studio details forthcoming.</p>
+-            </div>
+-          </li>
++          {aboutContent.values.map((value) => (
++            <li key={value.title}>
++              <span aria-hidden="true">{value.mark}</span>
++              <div>
++                <strong>{value.title}</strong>
++                <p>{value.description}</p>
++              </div>
++            </li>
++          ))}
+         </ul>
+       </section>
+       <section className="specialties paper">
+@@ -183,17 +206,18 @@ export default function HomePage() {
+         <div>
+           <p className="kicker">FAQ</p>
+           <h2>Questions? Start here.</h2>
+-          <p>
+-            Booking policies will be published after Miles supplies approved
+-            answers.
+-          </p>
++          <p>Find current booking and studio information in one place.</p>
++          <Link className="quiet-link" href="/faq">
++            Visit FAQ →
++          </Link>
+         </div>
+         <div>
+           <p className="kicker">Contact &amp; booking</p>
+           <h2>Planning a piece?</h2>
+-          <p>
+-            Consultation destination and studio contact details forthcoming.
+-          </p>
++          <p>Share your idea, placement, references, and creative direction.</p>
++          <Link className="quiet-link" href="/consultation">
++            Start a consultation request →
++          </Link>
+         </div>
+       </section>
+       <section className="process paper" id="process">
+@@ -237,12 +261,10 @@ export default function HomePage() {
+           <span aria-hidden="true">✦</span> Book a consultation{" "}
+           <span aria-hidden="true">✦</span>
+         </h2>
+-        <p>
+-          Let&apos;s create something meaningful. Consultation link forthcoming.
+-        </p>
+-        <span className="button disabled" aria-disabled="true">
+-          Booking opens here
+-        </span>
++        <p>Let&apos;s create something meaningful.</p>
++        <Link className="button" href="/consultation">
++          Start your request
++        </Link>
+       </section>
+     </>
+   );
+diff --git a/app/work/page.tsx b/app/work/page.tsx
+index 4140b11..5b16705 100644
+--- a/app/work/page.tsx
++++ b/app/work/page.tsx
+@@ -18,7 +18,7 @@ export default async function WorkPage() {
+           A focused selection of finished tattoo work and illustrative studies.
+         </p>
+       </header>
+-      {configured && items.length ? (
++      {configured ? (
+         <Gallery items={items} headingLevel="h2" />
+       ) : (
+         <DevelopmentGallery items={developmentTattoos} headingLevel="h2" />
+diff --git a/content/development-media.ts b/content/development-media.ts
+index a7909de..3f49d9b 100644
+--- a/content/development-media.ts
++++ b/content/development-media.ts
+@@ -49,7 +49,7 @@ export const developmentTattoos = [
+   },
+ ] as const satisfies readonly DevelopmentMedia[];
+ 
+-export const developmentHeroTattoos = developmentTattoos.slice(0, 3);
++export const developmentHeroTattoos = developmentTattoos.slice(0, 4);
+ 
+ export const developmentDrawings = [
+   {
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 34ceb53..a1db6da 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -10,6 +10,9 @@ Implemented locally and in checked-in migration form; not externally provisioned
+ Public visitor ──> Next.js public routes ──> published-only query ──> Supabase PostgreSQL
+                                          └───────────────────────> controlled media delivery
+ 
++Public visitor ──> validated consultation server action ──> dedicated consultation tables
++                                                    └─────> private intake bucket
++
+ Owner ──> Supabase Auth ──> protected Next.js admin routes
+                            ├─> validated metadata mutation ──────> PostgreSQL
+                            └─> validated image upload ──────────> private staging / public media path
+@@ -17,26 +20,33 @@ Owner ──> Supabase Auth ──> protected Next.js admin routes
+ 
+ The application owns client-specific presentation, validation, and editorial workflow. Supabase owns identity, relational state, object bytes, database authorization policies, and persistence. No other project reads or writes this backend.
+ 
+-## Proposed route structure
++## Route structure
+ 
+ ### Public
+ 
+-- `/` — hero, selected work, drawings/flash, bio, specialties, FAQ, CTA, contact
+-- `/work` — published gallery with type/style filters only when supported by real volume
++- `/` — hero tattoo rail, drawings/flash, About preview, specialties, FAQ/contact preview, process, and consultation CTA
++- `/about` — standalone artist introduction using the approved About content and portrait
++- `/faq` — standalone booking/studio information using accessible native disclosures
++- `/work` — published-only editorial gallery with development fallback when live data is unavailable
++- `/consultation` — public project-request form; submission does not book an appointment
+ - `/work/[slug]` — optional detail route after the first slice proves a need
+ 
++The shared application shell provides the sticky primary navigation and a site-wide footer containing the existing newsletter form plus valid Studio, Explore, and Plan destinations.
++
+ ### Private
+ 
+ - `/admin/login` — owner authentication
+-- `/admin` — editorial item list
+-- `/admin/portfolio/new` — create/upload/publish form
+-- `/admin/portfolio/[id]` — deferred edit flow
++- `/admin` — editorial item list with publication, gallery, and four-slot homepage controls
++- `/admin/portfolio/new` — multi-file private-draft uploader with independent per-file results
++- `/admin/portfolio/[id]` — metadata and image-description editor
+ 
+ ### Controlled server endpoints/actions
+ 
+ - Authenticate through Supabase server-side helpers/cookies.
+-- Create an item as unpublished, upload validated media, associate its storage object, then explicitly publish.
+-- Public query projects only an allowlisted set of fields where `published = true`.
++- Create each uploaded image as its own unpublished item, upload validated media, associate its private storage object, then explicitly publish after metadata review.
++- Public gallery queries require `published = true` and `show_in_gallery = true`. Homepage queries require `published = true` and `featured = true`, ordered by a unique `homepage_order` from 1–4.
++- An owner-only database function changes gallery visibility and homepage placement together so slot displacement remains atomic while the two public surfaces stay independent.
++- The consultation action validates and normalizes all visitor input on the server, signature-checks bounded JPEG/PNG/WebP uploads, and uses a server-only Supabase service-role client to write only to dedicated consultation tables and the private `consultation-intake` bucket. No anonymous database or Storage grant is added.
+ 
+ ## Authentication and authorization
+ 
+@@ -45,6 +55,7 @@ The application owns client-specific presentation, validation, and editorial wor
+ - Middleware may provide early route redirection, but every privileged mutation must verify the user on the server.
+ - RLS denies anonymous writes and limits authenticated writes to the approved owner identity/role.
+ - Service-role credentials, if required, remain server-only and are never exposed to the browser. Prefer user-scoped operations under RLS where practical.
++- Public consultation submission is the narrow exception: visitors have no Supabase session, so a validated server action owns the privileged write boundary. The browser receives neither the service-role credential nor a private object URL.
+ 
+ ## Storage structure
+ 
+@@ -61,6 +72,15 @@ portfolio-media/
+ - Unpublished media lives in private `portfolio-drafts`. Publishing copies validated bytes to public `portfolio-media`, updates metadata/state, and then removes the private object. Public bucket writes remain owner-only; public reads apply only after promotion.
+ - Additional images are modeled separately but deferred from the first create slice unless the primary-image path is already complete.
+ 
++Consultation uploads use a separate private bucket and keyspace:
++
++```text
++consultation-intake/
++  consultations/{consultation_request_id}/{random_uuid}.{validated_extension}
++```
++
++Each image is limited to 5 MB; one request accepts at most five references and one body-area image. The action compensates a partial failure by removing uploaded objects and the request row when possible.
++
+ ## Deployment and environments
+ 
+ - Vercel: Next.js build and runtime.
+@@ -78,4 +98,4 @@ portfolio-media/
+ 
+ ## Phase 3 vertical slice
+ 
+-Only one complete path: owner signs in, creates one portfolio item with one primary image and metadata, saves it unpublished, publishes it, and observes it in the public gallery. FAQ, SiteContent editing, multi-image editing, filters, CRM-lite, and generalized content blocks remain deferred.
++The verified foundation remains owner sign-in → one private image draft → explicit publication → public gallery. The next local slice adds independent multi-file draft ingestion, metadata editing, unpublish, gallery visibility, and four ordered homepage placements without becoming a generalized CMS. Multi-image-per-item editing, filters, CRM-lite, and generalized content blocks remain deferred.
+diff --git a/docs/DECISIONS.md b/docs/DECISIONS.md
+index f67fa2b..bda759a 100644
+--- a/docs/DECISIONS.md
++++ b/docs/DECISIONS.md
+@@ -18,7 +18,7 @@
+ ## ADR-003 — Isolated Supabase backend
+ 
+ - **Date:** 2026-08-12
+-- **Status:** Accepted and implemented locally; no resources provisioned
++- **Status:** Accepted, implemented, and live-verified in development
+ - **Decision:** Use one Client A Supabase project for PostgreSQL, object storage, and owner authentication. Use Row Level Security as defense in depth and keep privileged mutations on controlled server paths.
+ - **Rationale:** It supplies the requested structured persistence, media storage, and owner auth with one isolated operational boundary and a clear path to future CRM-lite tables.
+ - **Alternatives rejected:** Repository/filesystem content cannot satisfy remote administration or durable object storage. A bespoke database/auth/storage stack adds operations without improving the first slice. Shared ecosystem infrastructure violates the explicit exclusion.
+@@ -59,3 +59,27 @@
+ - **Status:** Accepted
+ - **Decision:** Use one development project for the current implementation. Require a separate production Supabase project and reviewed migration before deployment.
+ - **Consequences:** No development data, user identity, bucket, or credential is promoted directly into production.
++
++## ADR-009 — Direct server-only Mailchimp newsletter boundary
++
++- **Date:** 2026-08-14
++- **Status:** Accepted and implemented locally; external integration unverified
++- **Decision:** Submit normalized visitor email addresses from a Next.js server action directly to one configured Mailchimp audience. Keep the API key, server prefix, and audience ID in server-only environment variables and do not duplicate subscribers in Supabase.
++- **Rationale:** Mailchimp is the requested subscriber system of record. A second local subscriber table would add personal-data retention, synchronization, deletion, and consent obligations without supporting this narrow slice.
++- **Consequences:** Live verification and production operation require a Mailchimp API key, data-center/server prefix, and audience ID. Consent mode, rate limiting, bot mitigation, and provider failure monitoring must be reviewed before production traffic.
++
++## ADR-010 — Independent gallery and ordered homepage placement
++
++- **Date:** 2026-08-14
++- **Status:** Accepted and implemented in migration form; development application pending
++- **Decision:** Retain `featured` as the homepage-inclusion flag, add `show_in_gallery` for independent gallery visibility, and add one nullable unique `homepage_order` constrained to slots 1–4. Change placement through one owner-gated database function that clears an occupied target slot and updates the selected item atomically.
++- **Rationale:** The prior model could distinguish published from draft but could not express published work shown on only one public surface or preserve four explicit hero positions. Three narrow fields reuse the current architecture without introducing generalized page-builder concepts.
++- **Consequences:** Public reads remain published-only. Applying the follow-up migration is required before the expanded admin controls operate; public routes include legacy-compatible reads during that rollout boundary.
++
++## ADR-011 — Server-mediated private consultation intake
++
++- **Date:** 2026-08-14
++- **Status:** Accepted and implemented locally; migration and live persistence unverified
++- **Decision:** Keep public visitors outside direct Supabase table and Storage permissions. A validated Next.js server action uses a server-only service-role credential to create rows in dedicated `consultation_requests` and `consultation_request_media` tables and upload bounded images to the private `consultation-intake` bucket.
++- **Rationale:** Consultation requests contain private contact and project material. Direct anonymous grants would widen access and complicate abuse controls, while mixing requests into portfolio publishing tables would violate the established content boundary.
++- **Consequences:** Production operation requires the migration and a securely configured `SUPABASE_SERVICE_ROLE_KEY`. The action must remain narrowly validated and server-only. Deployment-level rate limiting or bot mitigation must be reviewed before public launch; no booking or Calendly integration is implied.
+diff --git a/docs/PROJECT_STATE.md b/docs/PROJECT_STATE.md
+index 6ac8da8..89fa378 100644
+--- a/docs/PROJECT_STATE.md
++++ b/docs/PROJECT_STATE.md
+@@ -1,17 +1,17 @@
+ # Client Website A — Project State
+ 
+-_Last updated: 2026-08-14 for the public portfolio gallery refinement._
++_Last updated: 2026-08-14 for the consultation presentation refinement._
+ 
+ ## Project header
+ 
+ - **Type:** Premium tattoo artist portfolio with private content administration
+ - **Client:** Miles / MGM.TATZ
+-- **Objective:** Present Miles's tattoo and illustration practice through a distinctive public experience and prove one secure end-to-end owner publishing path.
+-- **Current Phase:** Phase 3 publishing vertical slice verified against the development Supabase project
++- **Objective:** Present Miles's tattoo and illustration practice through a distinctive public experience, preserve the verified publishing path, and provide controlled newsletter and consultation-request entry points.
++- **Current Phase:** Publishing verified against development Supabase; consultation intake implemented locally with migration and live private persistence awaiting verification
+ - **Writable Scope:** `/home/nazeer171/Desktop/Client-Website-A` only
+ - **Autonomy:** High for reversible work inside the repository
+ - **Depth:** Production foundation
+-- **Completion Standard for current checkpoint:** Record the observed owner login → private draft → public absence → publish → public visibility path without expanding product scope
++- **Completion Standard for current checkpoint:** Dedicated consultation route, requested ordered fields, safe private persistence architecture, responsive and accessible form behavior, focused tests, and explicit live-verification boundaries
+ 
+ ## Canonical current state
+ 
+@@ -20,33 +20,42 @@ _Last updated: 2026-08-14 for the public portfolio gallery refinement._
+ - This is a separate Git repository on branch `main`.
+ - The repository contains a Next.js `16.3.0` App Router application with React `19.2.8`, strict TypeScript `6.0.2`, Supabase SSR `0.12.0`, Supabase JS `2.109.0`, ESLint, Prettier, and Node tests.
+ - Public `/` and `/work` routes render the approved black/ivory/gold editorial foundation and explicit placeholders where client content is unavailable.
+-- Home uses a dark Miles-led hero with a three-image finished-tattoo rail, followed by an ivory drawings rail, dark split About section, ivory specialties, dark FAQ/contact band, ivory four-step process, and dark consultation/footer close.
++- Home uses a dark Miles-led hero with up to four ordered, admin-controlled published images, followed by an ivory drawings rail, dark split About section, ivory specialties, a short dark FAQ/contact preview, ivory four-step process, and dark consultation close. With Supabase unavailable it uses the four established development tattoos; with live data it renders only eligible rows and creates no placeholder cards.
++- `/about` reuses the approved homepage introduction, About statement, value placeholders, and Miles portrait in a standalone dark editorial layout. `/faq` holds the current limited booking/contact placeholders in keyboard-operable native disclosures on an ivory supporting-page layout.
++- Primary About and FAQ links route to `/about` and `/faq`. The expanded shared footer places the existing newsletter signup prominently on the left and organizes only working Studio, Explore, and Plan destinations on the right; mobile becomes a single-column directory with 44px link targets.
+ - The standalone homepage Selected Work section is intentionally removed. The full Selected Work gallery remains available at `/work`.
+ - `/work` is the primary public tattoo portfolio page. It uses a responsive editorial grid with natural image proportions, restrained title/category/optional-description metadata, and an accessible native-dialog focused view with Escape, backdrop, and explicit back controls.
+ - Navigation is CSS-sticky with a compact translucent charcoal surface and responsive anchor offsets.
+ - Dark-to-ivory boundaries use a subtractive paper-colored pseudo-element masked by a non-repeating SVG charcoal-erosion texture. The mask erodes only the dark section's lower band; detached flecks and the dark light-section seam have been removed.
+-- `/admin/login`, `/admin`, and `/admin/portfolio/new` implement password login, owner-only access, draft creation, image validation, and explicit publishing.
+-- The checked-in SQL migration defines portfolio/media/style tables, two storage buckets, indexes, owner allowlisting, public-published reads, owner-only mutations, and seeded data-driven style tags.
++- `/admin/login`, `/admin`, `/admin/portfolio/new`, and `/admin/portfolio/[id]` implement password login, owner-only access, multi-file batch selection, independent per-file private draft creation, metadata editing, publication state, gallery/homepage placement, explicit publish, and unpublish-to-draft behavior.
++- The original checked-in SQL migration defines portfolio/media/style tables, two storage buckets, indexes, owner allowlisting, public-published reads, owner-only mutations, and seeded data-driven style tags. A follow-up migration adds `show_in_gallery`, four unique ordered homepage slots, placement validity checks, and an owner-gated atomic placement function.
+ - Draft images are private. Publishing promotes media to a public bucket and removes the private copy after metadata/state succeeds.
++- Newsletter submission uses a public Next.js server action, server-side email validation/normalization, and a direct Mailchimp Marketing API request. Mailchimp credentials remain server-only, and subscriber data is not duplicated in Supabase.
++- `/consultation` uses a desktop parchment/charcoal split: a branded warm-taupe sketchbook introduction, email note, four-step review process, and subdued development artwork sit beside a dark numbered 01–05 form panel. The light surface uses a dedicated, non-tiling broad-tone/grain/fiber SVG rather than the brighter global paper token. At phone widths the panels stack into one column with the established subtractive charcoal edge between them. The route retains local image previews, friendly field-level validation, an explicit request acknowledgement, and a request-only confirmation state.
++- Consultation persistence is isolated from portfolio publishing in dedicated tables and a private bucket. A validated server action owns the server-only privileged write boundary; anonymous Supabase table and Storage access remains denied.
+ - Nazeer approved the repository path and the Next.js + Supabase + Vercel architecture direction on 2026-08-12.
+ - One development Supabase project is configured and was used for the live publishing verification. Production still requires a separate project before deployment.
+ - No Vercel project or domain has been created or accessed.
+-- Final artist copy, studio details, social links, FAQ answers, and consultation destination have not been supplied.
++- Final artist copy, studio details, social links, FAQ answers, and an approved scheduling destination have not been supplied.
+ 
+ ### Verification observed
+ 
+-- Formatting, zero-warning lint, strict type checking, 7 tests, and production build pass.
++- Formatting, zero-warning lint, strict type checking, 27 tests, and production build pass.
+ - Without credentials, `/`, `/work`, and `/admin/login` return 200; anonymous `/admin` returns a 307 redirect to login.
+ - Desktop and true 375-CSS-pixel mobile screenshots show no observed clipping or collision after a mobile header correction.
+ - The public frontend now follows the approved editorial reference hierarchy: dark hero/gallery, tall artwork bays, ivory drawing rail, split dark About band, icon-led specialties, FAQ/contact band, four-step process, and dark consultation close. All unavailable media/content remains explicitly marked forthcoming.
+-- Nine client-provided JPEGs are stored as development fixtures under `public/client-media`: four finished tattoos, four drawings/studies, and one source portrait of Miles. A typed frontend manifest owns their dimensions, alt text, titles, crop positions, and the new vertical tattoo's non-cropping presentation.
+-- Home retains the established three-tattoo hero rail. When Supabase is unconfigured or has no published rows, all four client-provided tattoo fixtures populate `/work`. Real published Supabase rows continue to take precedence without changing the gallery or publishing architecture.
++- Ten client-provided JPEGs are stored under `public/client-media`: four finished-tattoo fixtures, four drawing/study fixtures, one source portrait of Miles, and the cropped navbar bird asset. The typed frontend manifest owns portfolio dimensions, alt text, titles, crop positions, and the vertical tattoo's non-cropping presentation.
++- Home now supports four simultaneous desktop cards and a contained horizontal rail on tablet/mobile. Instrumented renders observed four development cards at 1440px without rail overflow and four cards at an exact 375×812 CSS viewport with internal rail overflow but no page overflow. The configured development project currently supplies two legacy featured items, which render without empty placeholders.
+ - Miles's source portrait is non-destructively cropped with CSS to exclude Instagram interface/story overlays from the visible About frame.
+ - The approved-reference scale pass reduces headline, media, navigation, CTA, and section dimensions while retaining the existing hierarchy. Responsive grids return to one column below 900px, with compact two-column drawing/specialty content at phone widths.
+ - Nazeer reported a successful live end-to-end check against the development Supabase project: password owner login, image upload, private draft save, confirmation that the draft was absent from `/work`, explicit publish, and confirmation that the published item appeared on `/work`.
+ - This proves the user-visible publishing vertical slice. Direct database-row inspection, direct anonymous draft-object denial, non-owner rejection, and internal Storage promotion/removal were not separately recorded in this checkpoint.
+ - After the `/work` refinement, the configured production route returned 200 and rendered the two live published items rather than development fallback content. A read-only anonymous REST check returned the same two published rows and zero draft rows under live RLS.
+ - Headless interaction checks at 1440×1000 and an exact 375×812 CSS viewport confirmed natural index proportions, `contain`-preserved focused media, native Escape close, explicit back-button close, scroll lock cleanup, a single mobile column, 52px mobile view targets, and no horizontal overflow.
++- Newsletter tests confirm empty/invalid rejection, lowercase normalization, correct Mailchimp member request construction, success-state mapping, graceful already-subscribed behavior, and non-sensitive provider errors. Browser checks confirm the form precedes the consultation CTA, valid input reaches the server action, missing configuration produces a safe message, and the 375px layout is single-column with no overflow.
++- Consultation tests and production-browser checks confirm required and invalid-email handling, preservation of entered values, three synthetic image previews, sticky navigation, responsive desktop/mobile form grids, and no horizontal overflow. The valid synthetic request reached the server action and stopped safely at the missing service-role configuration boundary.
++- The consultation presentation pass was instrumented at 1440×1000 and exact 375×812 CSS viewports. Observed results include a 415px/1025px desktop split, one 375px mobile column, five numbered form sections, a loaded non-repeating panel-edge mask, 56.8px minimum text/select controls, sticky-header top `0`, three synthetic local previews with 44px remove controls, no browser exceptions, and no horizontal overflow.
++- The consultation paper refinement reports a computed sidebar base of `rgb(196, 178, 148)` and a loaded dedicated paper surface at `0.68` opacity at both inspected widths. Final captures show broad tonal irregularity and subdued paper tooth without the rejected bright-ivory glow, directional fabric striation, hard artwork rectangle, or straight desktop divider.
+ 
+ ## Product direction
+ 
+@@ -57,7 +66,7 @@ _Last updated: 2026-08-14 for the public portfolio gallery refinement._
+ 
+ ## Current public content scope
+ 
+-Hero/artist intro, tattoo rail, drawings/flash, About Miles, specialties/influences, FAQ/contact, process, consultation CTA, and Chicago/footer information. Final biography, studio, booking, and social copy remains blocked pending client-approved source material.
++Hero/artist intro, tattoo rail, drawings/flash, homepage About Miles, specialties/influences, shortened FAQ/contact preview, process, consultation CTA, standalone `/about`, standalone `/faq`, and a shared newsletter/directory footer with Chicago information. Final biography, studio, booking, FAQ, and social copy remains blocked pending client-approved source material.
+ 
+ ## Exclusions
+ 
+@@ -66,6 +75,7 @@ Aftercare, design-to-tattoo pairing, advanced CRM automation, payment processing
+ ## Approval gates
+ 
+ - Creating or linking production Supabase/Vercel resources requires separate approval and credentials supplied through secure environment configuration.
++- Creating a Mailchimp account, audience, API key, or campaign requires separate approval; this checkpoint provisions none of them.
+ - Production database migrations, storage policies, and deployment require review before external mutation.
+ - Public artist claims and media require client approval/provenance.
+ 
+@@ -76,7 +86,15 @@ Aftercare, design-to-tattoo pairing, advanced CRM automation, payment processing
+ - The hero uses three development tattoos; `/work` exposes all four only when no real published Supabase rows are available.
+ - Non-owner rejection, direct anonymous access denial for draft objects, and internal row/object state were not independently inspected during the reported live flow.
+ - The focused work view is intentionally stateful rather than URL-addressable; deep-linking individual portfolio items remains an open product decision rather than part of this pass.
++- Mailchimp is not configured, so real subscription delivery and audience membership remain unverified. Live verification requires `MAILCHIMP_API_KEY`, `MAILCHIMP_SERVER_PREFIX`, and `MAILCHIMP_AUDIENCE_ID` in server-only environment configuration.
++- The public newsletter action has no application-level rate limiter or bot challenge in this slice; provider protections and deployment-level controls must be reviewed before production traffic.
++- The public consultation action uses a honeypot and strict validation/file limits but has no durable rate limiter or bot challenge. Deployment-level abuse controls must be reviewed before production traffic.
++- The consultation migration is checked in but unapplied, and `SUPABASE_SERVICE_ROLE_KEY` is not configured locally. Live request-row creation, private image persistence, owner review access, and provider-failure cleanup remain unverified.
++- The surface-placement migration is checked in but was not applied to the development Supabase project in this pass because no connected Supabase management capability or CLI was available. Public routes retain a read-compatible legacy fallback; expanded admin controls require the migration.
++- The client supplied a dedicated 1536×1527 circular bird source. A non-destructive 1440px square crop, reduced to a 256px development asset, now fills the existing navbar seal without changing header dimensions or replacing the MGM.TATZ wordmark.
++- The batch client, metadata edit, placement mutation, and unpublish compensation path passed static/type/unit/build checks but were not exercised with an authenticated live owner session in this pass.
++- Five additional client artwork sources (`11.jpg`–`15.jpg`) are locally available but remain outside the repository and Supabase. They were not hardcoded or copied as fallback fixtures; authenticated draft ingestion remains pending the development migration and owner session.
+ 
+ ## Current milestone
+ 
+-The owner-facing development publishing path is live-verified through public gallery visibility. The next leverage point is hardening the remaining negative-path evidence, replacing development fixtures/placeholders with approved client content, and preparing a separate production Supabase project before deployment.
++The original owner publishing path remains live-verified, and the consultation intake surface plus its private persistence migration are locally complete. The next leverage point for this slice is to review/apply `202608140002_consultation_requests.sql`, configure the service-role value server-side, then submit one synthetic request and verify its private rows/objects and owner-only retrieval before considering a Calendly handoff.
+diff --git a/docs/TRAJECTORY.md b/docs/TRAJECTORY.md
+index d43c4ce..1837cee 100644
+--- a/docs/TRAJECTORY.md
++++ b/docs/TRAJECTORY.md
+@@ -1,5 +1,189 @@
+ # Client Website A — Trajectory
+ 
++## 2026-08-14 — Consultation paper and tone refinement
++
++**Objective**
++
++Correct the overly bright consultation sidebar and make the approved sketchbook-paper treatment materially visible without changing the form or consultation flow.
++
++**Changes**
++
++- Replaced the consultation sidebar's global ivory base and strong white highlight with a dedicated muted taupe paper token and restrained tonal variation.
++- Added a full-panel, non-repeating SVG surface with broad paper variation, fine grain, and softened irregular fiber tooth. The consultation charcoal edge uses the same taupe so the join does not flash back to ivory.
++- Removed the straight desktop divider and faded/repositioned the mobile tiger treatment so artwork and paper dissolve into the existing organic charcoal boundary without a rectangular seam.
++
++**Verification boundary**
++
++- Production renders were inspected at 1440×1000 and exact 375×812 CSS pixels after both the initial and corrected texture passes. The first directional-fiber version was rejected as fabric-like and softened before final verification.
++- Final instrumentation reports the paper asset loaded at both widths, computed taupe `rgb(196, 178, 148)`, sticky-header top `0`, no horizontal overflow, and no browser exception.
++
++**Drift check**
++
++Only consultation presentation CSS, one dedicated visual asset, and project memory changed. Form fields, validation, actions, Supabase, auth, Storage, portfolio publishing, routes, and external resources remain unchanged.
++
++## 2026-08-14 — Consultation presentation refinement
++
++**Objective**
++
++Bring the existing consultation-request route into the approved parchment/charcoal split composition without changing its server action, private persistence architecture, or booking boundary.
++
++**Changes**
++
++- Rebuilt only the consultation presentation around a light branded information/process sidebar and a dark numbered 01–05 form panel.
++- Retained every required backend field, added a visible optional Instagram input through the existing notes payload, and added an explicit request-not-booking acknowledgement without changing the database contract.
++- Added a dedicated non-repeating charcoal panel-edge mask, subtle paper and linework treatments, responsive stacked layout, and a gold editorial submission treatment.
++
++**Verification boundary**
++
++- Formatting, zero-warning lint, strict types, all 27 tests, and the production build pass.
++- Instrumented production renders at 1440×1000 and exact 375×812 CSS pixels confirm the desktop split, mobile single column, five numbered sections, sticky header, comfortable controls, local previews, and no horizontal overflow or browser exception.
++- Only invalid/acknowledgement validation was exercised in the final visual check. No valid request, supplied artwork, personal data, database row, Storage object, or external write was submitted during this pass.
++
++**Drift check**
++
++No consultation server action, Supabase table, Storage policy, authentication, portfolio publishing path, newsletter behavior, route inventory, or external account changed.
++
++## 2026-08-14 — Consultation-request vertical slice
++
++**Objective**
++
++Add a calm public project-request flow that gathers enough information for artist review without becoming a booking engine or weakening the verified portfolio boundaries.
++
++**Changes**
++
++- Added `/consultation` and routed shared consultation navigation and CTAs to it while retaining the homepage `#consult` destination.
++- Added the requested ordered, accessible form with inline validation, value preservation, bounded image previews/removal, and an explicit request-only confirmation state. Phone remains optional; email is the primary required contact channel.
++- Added a validated server action, dedicated consultation tables, a private intake bucket, strict file count/type/size/signature checks, and partial-failure cleanup. Public visitors receive no direct Supabase table or object permission.
++- Added a server-only service-role environment boundary and focused validation/schema tests. No Calendly, booking, payment, portfolio, newsletter, or admin feature was added.
++
++**Verification boundary**
++
++- Local formatting, lint, strict types, tests, production build, route checks, and whitespace review pass. Instrumented 1440×1000 and exact 375×812 renders confirm sticky navigation, responsive two-/one-column form behavior, comfortable controls, upload previews, and no horizontal overflow.
++- Required and malformed-email errors were observed with entered values retained. A fully valid synthetic submission reached the server action and returned the intended safe unavailable state because the service-role key and consultation migration are not configured locally.
++- Database insertion, private object persistence, owner retrieval, cleanup under a provider failure, and a future Calendly handoff remain unverified live.
++
++**Drift check**
++
++The slice adds only consultation intake. Existing portfolio authentication, RLS, publishing actions, public gallery behavior, newsletter integration, client media, and external accounts remain unchanged.
++
++## 2026-08-14 — Navbar identity asset and supplied batch intake
++
++**Objective**
++
++Use the newly supplied circular bird artwork for the existing navbar seal and ingest the five supplied portfolio images only through the real private-draft pipeline.
++
++**Changes**
++
++- Cropped `10.jpg` non-destructively to the circular composition's clean square bounds, reduced it to a crisp 256px JPEG, and placed it in the unchanged navbar seal with the MGM.TATZ wordmark preserved.
++- Kept `11.jpg`–`15.jpg` outside application content. They were not hardcoded or copied into the development fallback because the approved path is authenticated Supabase draft ingestion.
++
++**Verification boundary**
++
++- Desktop 1440×1000 and exact 375×812 CSS renders show the bird centered and fully clipped within the existing seal, the MGM.TATZ wordmark intact, the sticky header unchanged in height, and no horizontal overflow. The optimized image completed at both widths.
++- Formatting, zero-warning ESLint, strict TypeScript, all 19 tests, and the production build pass.
++- The live artwork upload is blocked on two explicit prerequisites: applying the checked-in placement migration and providing an authenticated owner session. No credential, RLS bypass, direct unauthenticated write, or alternative content path was introduced.
++
++**Drift check**
++
++Only the logo asset/presentation and decision-relevant project memory changed. Portfolio architecture, auth, RLS, Storage, publishing, public queries, newsletter behavior, routes, and external resources remain unchanged.
++
++## 2026-08-14 — Practical portfolio administration expansion
++
++**Objective**
++
++Expand the existing owner-only portfolio desk into a bounded content-management surface while preserving the verified auth, private-draft, explicit-publish, Storage, RLS, and editorial `/work` architecture.
++
++**Changes**
++
++- Replaced the single-image create form with a client-side multi-file batch preparer: previews, per-file removal, generated editable title/alt text, shared type, and independent selected/uploading/success/error states. Each file calls the existing private-draft pipeline separately, so a failed image does not roll back successful siblings.
++- Added owner-only metadata editing and unpublish-to-private-draft controls. Bulk drafts use a recognizable temporary description and cannot publish until the owner replaces it with reviewed metadata.
++- Added a follow-up migration with independent gallery visibility, four unique ordered homepage slots, validity constraints, migration backfill, and an owner-gated atomic placement function.
++- Switched Home's artwork rail to up to four real published/featured rows ordered by slot, retaining four development cards only when Supabase is unavailable. `/work` now filters `published` plus `show_in_gallery`; legacy-compatible public reads preserve availability until the migration is applied.
++- Expanded the admin list to expose publication state, gallery visibility, homepage slot, metadata editing, placement changes, and unpublish behavior.
++
++**Verification**
++
++- `npm run format:check`, zero-warning ESLint, strict TypeScript, all 19 tests, production build, and whitespace diff checks pass.
++- Built public routes `/`, `/work`, `/about`, `/faq`, and `/admin/login` return 200. Anonymous `/admin` and `/admin/portfolio/new` retain 307 redirects to `/admin/login`.
++- Instrumented browser evidence at 1440×1000 and exact 375×812 CSS viewports confirms four fallback hero cards across desktop, an internal mobile rail, sticky-header top position after scroll, and no page-level horizontal overflow. The configured development project currently returns two homepage-featured items, and Home renders only those two without placeholders.
++- Live authenticated batch upload, invalid-file isolation, new placement controls, and unpublish were not observed because the follow-up migration was not applied and no authenticated owner session was available in this pass.
++
++**Drift check**
++
++No auth provider, base RLS policy, bucket policy, existing publish action semantics, public gallery presentation component, Mailchimp behavior, dependency, external account, deployment, or remote changed. The requested bird logo remains blocked by the absence of a usable source asset.
++
++## 2026-08-14 — Supporting-page and newsletter footer polish
++
++**Objective**
++
++Polish `/about`, `/faq`, and the shared footer presentation while preserving content, native disclosure accessibility, newsletter behavior, and all backend boundaries.
++
++**Changes**
++
++- Moved the existing newsletter component from its standalone homepage band into a prominent site-wide footer column; the server action, validation, provider handling, environment contract, and success/error states are unchanged.
++- Reorganized the footer's valid destinations into Studio, Explore, and Plan groups, omitted unavailable social/contact destinations, and strengthened hierarchy, spacing, borders, form treatment, and mobile touch targets.
++- Refined About proportions and copy rhythm without changing the corrected portrait transform or approved content. Refined FAQ spacing, open-state surface, separators, typography, indicator treatment, and answer line height without replacing native disclosures.
++- Preserved Home's short `/faq` preview and removed no homepage About content.
++
++**Verification**
++
++- Production renders at 1440×1000, 1024×900, and exact 375×812 confirm balanced desktop/tablet footer columns, a clean mobile newsletter/navigation stack, 48px submit control, 44px footer links, corrected About imagery, and no horizontal overflow.
++- A focused FAQ summary opens from browser Space-key input. The relocated newsletter form returns “Enter a valid email address.” for invalid input, and the browser records no console errors or uncaught exceptions.
++- Footer links resolve only to `/about`, `/work`, `/faq`, `/#drawings`, `/#process`, and `/#consult`; the unique public paths return 200. Home retains one short FAQ preview and no duplicate disclosure list.
++- Formatting, zero-warning ESLint, strict TypeScript, all 14 tests, production build, and whitespace diff checks pass.
++
++**Drift check**
++
++No newsletter action/provider logic, Supabase client, authentication, schema, migration, RLS, Storage, gallery, publishing action, admin behavior, dependency, external account, or deployment changed.
++
++## 2026-08-14 — About, FAQ, and footer supporting-page checkpoint
++
++**Objective**
++
++Create dedicated About and FAQ destinations and clarify shared navigation without redesigning the established site or changing product/backend behavior.
++
++**Changes**
++
++- Added static App Router routes at `/about` and `/faq`; both reuse centralized, already-approved homepage content rather than inventing biography, policy, studio, or contact claims.
++- Added keyboard-operable native FAQ disclosures for the two existing forthcoming-information states and reduced Home's FAQ area to a clear preview link.
++- Routed primary About/FAQ links to the new pages and expanded the shared footer into responsive Studio, Work, and Plan columns containing only real destinations.
++- Reused and non-destructively reframed the supplied Miles portrait on the About page; a first rendered crop exposed source overlay text and was tightened before completion.
++
++**Verification**
++
++- `/`, `/about`, `/faq`, `/work`, and `/admin/login` return 200 from the production server; anonymous `/admin` retains its 307 login redirect.
++- Browser checks at 1440×1000 and exact 375×812 CSS viewports confirm responsive supporting-page/footer grids, loaded About imagery without source overlay chrome, working route targets, no horizontal overflow, and no console exceptions.
++- The second FAQ disclosure was focused and opened through a real Space-key browser input. Home contains the short `/faq` preview and no duplicate disclosure list.
++- Formatting, zero-warning ESLint, strict TypeScript, all 14 tests, and the production build pass.
++
++**Drift check**
++
++No Supabase client, authentication, schema, migration, RLS, Storage, gallery query/presentation, upload/publish action, admin route, Mailchimp behavior, dependency, external account, or deployment changed.
++
++## 2026-08-14 — Mailchimp newsletter vertical slice
++
++**Objective**
++
++Add a compact homepage newsletter signup for promotions, availability, flash drops, and artist news without creating CRM scope or changing the verified portfolio system.
++
++**Changes**
++
++- Added an ivory newsletter band immediately before the final consultation CTA with a responsive email form, pending label, validation/error state, and success state.
++- Added a public Next.js server action that trims and lowercases email addresses before a server-only Mailchimp Marketing API request.
++- Added graceful handling for Mailchimp's `Member Exists` response and generic non-sensitive messages for provider/configuration failures.
++- Added placeholder environment names for the Mailchimp API key, server prefix, and audience ID. No credential, Mailchimp resource, subscriber table, dependency, campaign, popup, analytics, SMS, or adjacent marketing feature was added.
++
++**Verification**
++
++- Seven newsletter tests cover empty/invalid input, normalization, valid request construction, success-state mapping, already-subscribed handling, provider errors, and server-action messaging; all 14 repository tests pass.
++- With Mailchimp intentionally unconfigured, browser submission of a valid address reached the server action and returned the safe unavailable message; invalid input returned the specific validation message.
++- Desktop 1440×1000 and exact 375×812 screenshots confirm the section order, restrained scale, single-column mobile controls, 48px mobile submit target, and no horizontal overflow.
++- `/` and live-data-backed `/work` return 200; gallery and publishing tests remain green. Formatting, zero-warning ESLint, strict TypeScript, and production build pass.
++
++**Drift check**
++
++No Supabase table, migration, RLS policy, Storage bucket/policy, auth, admin, gallery, upload/publish action, dependency, external account, or Mailchimp resource changed.
++
+ ## 2026-08-14 — Public tattoo portfolio refinement
+ 
+ **Objective**
+diff --git a/docs/VERIFICATION.md b/docs/VERIFICATION.md
+index 607b7b9..148ed49 100644
+--- a/docs/VERIFICATION.md
++++ b/docs/VERIFICATION.md
+@@ -1,5 +1,85 @@
+ # Client Website A — Verification Contract
+ 
++## Consultation paper and tone refinement — 2026-08-14
++
++- The final production render computes the consultation sidebar at `rgb(196, 178, 148)` and loads `/consultation-paper.svg` as a non-repeating full-panel pseudo-element at opacity `0.68` on desktop and mobile.
++- Visual inspection at 1440×1000 confirms a muted parchment/taupe sidebar, readable dark text, subtle broad tonal variation and paper tooth, a charcoal form panel, and an irregular vertical join without the previous straight divider.
++- Exact 375×812 CSS inspection confirms one 343px form column, the tiger artwork fading into the paper before the subtractive horizontal charcoal edge, no hard artwork rectangle, and no horizontal overflow.
++- The first texture render exposed excessive directional striation that risked reading as linen/fabric. Its fiber frequency and opacity were reduced before the final captures; the corrected result retains visible paper variation without strong speckling or grunge.
++- No form field, validation rule, route, action, schema, external service, or valid submission changed during this pass.
++
++## Consultation presentation refinement — 2026-08-14
++
++- `npm exec prettier -- --check app/consultation/page.tsx components/consultation-form.tsx app/globals.css`, zero-warning `npm run lint`, strict `npm run typecheck`, all 27 tests, and `npm run build` pass.
++- Instrumented 1440×1000 production rendering reports a 414.7px parchment sidebar and 1025.3px charcoal panel, two 340.7px field columns, five numbered sections, sticky-header top `0`, a loaded dedicated vertical edge mask, no browser exception, and no horizontal overflow.
++- Exact 375×812 CSS rendering reports `innerWidth = 375`, one 343px field column, 56.8px minimum text/select controls, sticky-header top `0`, the responsive subtractive edge mask, no browser exception, and no horizontal overflow.
++- The parchment intro, four-step process, subdued tiger artwork, panel heading, contact/preferences/upload/final sections, CTA, and panel boundary were inspected in viewport captures. The mobile straight border was removed after inspection so the charcoal mask is the sole panel transition.
++- Empty submission returns the existing full-name error. A complete synthetic field set without acknowledgement focuses and marks the acknowledgement control invalid. Three synthetic local image previews render with 44px remove controls. No valid request was submitted and no external write was attempted in this visual pass.
++- The visual pass does not claim live database insertion, private object persistence, or owner review. Those remain subject to the existing consultation integration gate below.
++
++## Consultation request slice — 2026-08-14
++
++- Focused tests cover trimming and lowercase email normalization, optional phone handling, required-field and malformed-email rejection, select allowlists, five-reference maximum, image signature validation, and the dedicated private schema/policy shape.
++- Instrumented production rendering at 1440×1000 reports two 588px form columns, sticky-header top `0` after scroll, two upload controls, and no horizontal overflow.
++- Exact 375×812 CSS rendering reports `innerWidth = 375`, one 343px form column, sticky-header top `0`, minimum text/select control height about 52.8px, and no horizontal overflow. Upload-preview remove controls were increased to a 44px minimum after the first measurement exposed a 35.2px target.
++- Empty submission returns “Full name is required.” and marks the associated control invalid. A malformed email returns “Enter a valid email address.” while preserving the entered name and tattoo idea.
++- Two generated reference PNGs and one generated body-area PNG produce three local previews with remove controls. No client image or real personal data was used in this behavior test.
++- A fully valid synthetic request reaches the server action. With `SUPABASE_SERVICE_ROLE_KEY` absent, it returns the non-sensitive unavailable state, retains the form and all three previews, and produces no browser exception.
++- Production route checks return 200 for `/`, `/work`, `/about`, `/faq`, `/consultation`, and `/admin/login`; anonymous `/admin` retains its 307 redirect to `/admin/login`.
++- `npm run format:check`, zero-warning `npm run lint`, strict `npm run typecheck`, all 27 tests, `npm run build`, and `git diff --check` pass on the final tree.
++- Live insertion and private Storage persistence are not claimed. They require applying `202608140002_consultation_requests.sql` and securely configuring the server-only service-role value.
++
++## Navbar identity and supplied batch intake — 2026-08-14
++
++- Source inspection confirms `10.jpg` is 1536×1527 and the five portfolio sources are accessible JPEGs ranging from 1251–1536px wide and 1441–1536px high.
++- The navbar asset is a 256×256 JPEG generated from a centered 1440×1440 crop. The source files remain unchanged.
++- Instrumented 1440×1000 rendering reports a loaded optimized logo inside a 37.6×37.6px seal, sticky-header top `0` after scroll, and no page-level horizontal overflow. Exact 375×812 rendering reports a loaded logo inside a 28.8×28.8px seal, sticky-header top `0`, document/body width `375`, and no horizontal overflow. Both screenshots show the full circular composition and unchanged wordmark.
++- `npm run format:check`, zero-warning `npm run lint`, strict `npm run typecheck`, all 19 tests, and `npm run build` pass.
++- `11.jpg`–`15.jpg` were not uploaded: the application has only publishable Supabase configuration and the owner UUID, not an authenticated owner session, and the required placement migration remains unapplied. No live-upload claim is made.
++
++## Practical portfolio administration expansion — 2026-08-14
++
++- `npm run format:check` passes.
++- `npm run lint` passes with zero warnings.
++- `npm run typecheck` passes under strict TypeScript.
++- `npm test` passes all 19 tests. New coverage checks filename-derived batch metadata, valid/invalid four-slot parsing, all requested independent surface combinations, migration field/constraint/function shape, and owner-only placement mutation.
++- `npm run build` compiles and completes route generation successfully. `/`, `/admin`, `/admin/login`, `/admin/portfolio/[id]`, `/admin/portfolio/new`, and `/work` remain dynamic as intended.
++- Production route checks against the configured development environment: `/`, `/work`, `/about`, `/faq`, and `/admin/login` return 200; anonymous `/admin` and `/admin/portfolio/new` return 307 to `/admin/login`.
++- Rendered 1440×1000 desktop evidence shows four development hero cards simultaneously without increasing the hero height or creating rail overflow. The configured environment rendered its two currently featured legacy rows and did not create placeholders.
++- Instrumented exact 375×812 CSS evidence reports `innerWidth = 375`, document/body width `375`, no horizontal overflow, four fallback hero cards inside an overflowing internal rail, and sticky header top `0` after a 575px scroll. The live Home and `/work` also report no page-level horizontal overflow and sticky header top `0`.
++- The configured `/work` rendered its live published content through the existing editorial gallery. The original live login → upload → private draft → publish → `/work` evidence remains the latest authenticated publishing observation.
++- Not observed in this pass: applying `202608140001_portfolio_surface_placement.sql` to the development project; authenticated multi-file ingestion; mixed valid/invalid batch behavior against Storage; metadata edit persistence; gallery/homepage toggle persistence; slot displacement; unpublish object promotion reversal; direct row/object inspection; and the absent circular bird logo asset.
++- The first attempted Chromium “375” screenshot calibrated to 502 CSS pixels and was rejected as evidence. Final mobile claims use the instrumented `Emulation.setDeviceMetricsOverride` result at exactly 375 CSS pixels.
++
++## Supporting-page and newsletter footer polish — 2026-08-14
++
++- At 1440×1000, the footer renders a 620px newsletter column and 561px directory column, with three organized navigation columns and one newsletter form. About and FAQ retain controlled two-column editorial layouts.
++- At 1024×900, the footer remains a balanced 392px/448px split with three readable directory columns; About remains a 406px/516px split. No horizontal overflow was observed.
++- At an exact 375×812 CSS viewport, supporting pages and footer use one column. The newsletter field and button are each 338px wide, the submit control is 48px high, footer link targets are 44px high, and no horizontal overflow was observed.
++- The final About renders preserve the corrected source crop without story/interface overlays. The FAQ's second closed summary was focused and opened through browser Space-key input while focus remained on `SUMMARY`.
++- The relocated newsletter form returns “Enter a valid email address.” for malformed input. Home contains no obsolete newsletter band, retains the `/faq` preview, and shares the one footer form.
++- Footer destinations are `/about`, `/work`, `/faq`, `/#drawings`, `/#process`, and `/#consult`; unique public routes return 200. `/admin/login` returns 200 and anonymous `/admin` retains its 307 login redirect.
++- The browser recorded no console errors or uncaught exceptions. `npm run format:check`, `npm run lint`, `npm run typecheck`, `npm test` (14/14), `npm run build`, and `git diff --check` pass.
++
++## About, FAQ, and footer supporting pages — 2026-08-14
++
++- Production HTTP checks return 200 for `/`, `/about`, `/faq`, `/work`, and `/admin/login`; anonymous `/admin` returns 307 to `/admin/login`.
++- At 1440×1000, About renders a two-column portrait/editorial layout, FAQ renders a two-column introduction/disclosure layout, and the footer renders a wide identity area plus three organized navigation columns. No horizontal overflow was observed.
++- At an exact 375×812 CSS viewport, About and FAQ become single-column, the footer becomes one outer column with a controlled two-column link grid, the sticky header remains 82px high, and no horizontal overflow was observed.
++- The supplied About portrait loaded at both widths. Initial review exposed source overlay text at the crop edge; the crop was corrected and both final renders show only the intended portrait/studio area.
++- A focused closed `<summary>` opened through a browser-dispatched Space key and retained focus. Footer links resolve to `/about`, `/faq`, `/work`, `/#drawings`, `/#process`, and `/#consult`; Home's FAQ preview resolves to `/faq` and contains no duplicate disclosure list.
++- The browser recorded no console errors or uncaught runtime exceptions during the route/interaction sweep.
++- `npm run format:check`, `npm run lint`, `npm run typecheck`, `npm test` (14/14), `npm run build`, and `git diff --check` pass.
++
++## Mailchimp newsletter slice — 2026-08-14
++
++- Unit/action tests reject empty and malformed email values, normalize `Miles@Example.COM` to `miles@example.com`, and confirm a valid address produces `POST https://{server}.api.mailchimp.com/3.0/lists/{audience}/members` with server-side Basic authentication and a subscribed member body.
++- A mocked Mailchimp `Member Exists` response returns a friendly already-subscribed outcome. A mocked provider failure becomes “We couldn't add you right now. Please try again later.” without returning provider detail.
++- Production-browser submission confirms malformed input returns “Enter a valid email address.” A valid email reaches the server action and, because no Mailchimp environment exists, returns “Newsletter signup isn't available yet.” No external request or resource mutation occurs in that configuration.
++- At 1440×1000, the section is a compact two-column ivory band before the consultation CTA with no horizontal overflow. At an exact 375×812 CSS viewport, it becomes one 338px form column with a 338×48px submit control and no horizontal overflow.
++- Production `/` and `/work` return HTTP 200; `/work` remains live-data-backed. All 14 tests, including the existing publishing/schema tests, pass.
++- `npm run format:check`, `npm run lint`, `npm run typecheck`, `npm test`, and `npm run build` pass. Live Mailchimp delivery remains unverified pending the three server-only values.
++
+ ## Public portfolio gallery refinement — 2026-08-14
+ 
+ - Configured production `/work` returned HTTP 200, rendered `classic` and `dove`, and contained no development-fallback marker.
+diff --git a/lib/env.ts b/lib/env.ts
+index 4e702e8..991a6c1 100644
+--- a/lib/env.ts
++++ b/lib/env.ts
+@@ -21,3 +21,12 @@ export function getOwnerUserId() {
+   if (!ownerUserId) throw new Error("OWNER_USER_ID is not configured.");
+   return ownerUserId;
+ }
++
++export function getConsultationSupabaseEnvironment() {
++  const { url } = getSupabaseEnvironment();
++  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
++  if (!serviceRoleKey) {
++    throw new Error("Consultation Supabase access is not configured.");
++  }
++  return { url, serviceRoleKey };
++}
+diff --git a/lib/portfolio.ts b/lib/portfolio.ts
+index 0aa7649..bf1657f 100644
+--- a/lib/portfolio.ts
++++ b/lib/portfolio.ts
+@@ -13,6 +13,8 @@ export type PublishedPortfolioItem = {
+   description: string;
+   body_placement: string | null;
+   featured: boolean;
++  show_in_gallery: boolean;
++  homepage_order: number | null;
+   available: boolean;
+   display_order: number;
+   portfolio_media: Array<{
+@@ -24,13 +26,24 @@ export type PublishedPortfolioItem = {
+   }>;
+ };
+ 
+-export function validatePortfolioInput(formData: FormData) {
++export const homepageSlots = [1, 2, 3, 4] as const;
++export type HomepageSlot = (typeof homepageSlots)[number];
++
++export const BULK_DRAFT_DESCRIPTION =
++  "Description pending artist review before publication.";
++
++export type BulkDraftActionResult = {
++  status: "success" | "error";
++  message: string;
++  itemId?: string;
++};
++
++export function validatePortfolioMetadata(formData: FormData) {
+   const title = String(formData.get("title") ?? "").trim();
+   const type = String(formData.get("type") ?? "") as PortfolioType;
+   const description = String(formData.get("description") ?? "").trim();
+   const bodyPlacement = String(formData.get("bodyPlacement") ?? "").trim();
+   const altText = String(formData.get("altText") ?? "").trim();
+-  const image = formData.get("image");
+ 
+   if (title.length < 2 || title.length > 100)
+     throw new Error("Title must be 2–100 characters.");
+@@ -42,6 +55,20 @@ export function validatePortfolioInput(formData: FormData) {
+     throw new Error("Body placement must be 100 characters or fewer.");
+   if (altText.length < 5 || altText.length > 180)
+     throw new Error("Image description must be 5–180 characters.");
++
++  return {
++    title,
++    type,
++    description,
++    bodyPlacement: bodyPlacement || null,
++    altText,
++  };
++}
++
++export function validatePortfolioInput(formData: FormData) {
++  const metadata = validatePortfolioMetadata(formData);
++  const image = formData.get("image");
++
+   if (!(image instanceof File) || image.size === 0)
+     throw new Error("Choose an image.");
+   if (image.size > 10 * 1024 * 1024)
+@@ -50,15 +77,50 @@ export function validatePortfolioInput(formData: FormData) {
+     throw new Error("Image must be JPEG, PNG, or WebP.");
+ 
+   return {
+-    title,
+-    type,
+-    description,
+-    bodyPlacement: bodyPlacement || null,
+-    altText,
++    ...metadata,
+     image,
+   };
+ }
+ 
++export function draftMetadataFromFilename(filename: string) {
++  const withoutExtension = filename.replace(/\.[^.]+$/, "");
++  const words = withoutExtension
++    .replace(/[_-]+/g, " ")
++    .replace(/\s+/g, " ")
++    .trim();
++  const title = (words || "Untitled work")
++    .replace(/\b\w/g, (letter) => letter.toUpperCase())
++    .slice(0, 100);
++
++  return {
++    title,
++    altText: `${title} portfolio image.`.slice(0, 180),
++  };
++}
++
++export function parseHomepageSlot(value: FormDataEntryValue | null) {
++  if (value === null || value === "") return null;
++  const slot = Number(value);
++  if (!homepageSlots.includes(slot as HomepageSlot))
++    throw new Error("Choose a valid homepage slot.");
++  return slot as HomepageSlot;
++}
++
++export function resolveSurfaceVisibility({
++  published,
++  showInGallery,
++  homepageOrder,
++}: {
++  published: boolean;
++  showInGallery: boolean;
++  homepageOrder: number | null;
++}) {
++  return {
++    gallery: published && showInGallery,
++    homepage: published && homepageOrder !== null,
++  };
++}
++
+ export function extensionForMimeType(mimeType: string) {
+   const extensions: Record<string, string> = {
+     "image/jpeg": "jpg",
+diff --git a/lib/queries.ts b/lib/queries.ts
+index 4b69be4..4839c00 100644
+--- a/lib/queries.ts
++++ b/lib/queries.ts
+@@ -2,19 +2,87 @@ import { hasSupabaseEnvironment } from "@/lib/env";
+ import type { PublishedPortfolioItem } from "@/lib/portfolio";
+ import { createClient } from "@/lib/supabase/server";
+ 
++const portfolioSelect =
++  "id,title,type,description,body_placement,featured,show_in_gallery,homepage_order,available,display_order,portfolio_media!inner(storage_bucket,storage_key,alt_text,width,height)";
++const legacyPortfolioSelect =
++  "id,title,type,description,body_placement,featured,available,display_order,portfolio_media!inner(storage_bucket,storage_key,alt_text,width,height)";
++
++function placementSchemaIsPending(error: { code?: string; message?: string }) {
++  return (
++    error.code === "42703" ||
++    error.message?.includes("show_in_gallery") ||
++    error.message?.includes("homepage_order")
++  );
++}
++
+ export async function getPublishedPortfolioItems() {
+   if (!hasSupabaseEnvironment())
+     return { items: [] as PublishedPortfolioItem[], configured: false };
+   const supabase = await createClient();
+   const { data, error } = await supabase
+     .from("portfolio_items")
+-    .select(
+-      "id,title,type,description,body_placement,featured,available,display_order,portfolio_media!inner(storage_bucket,storage_key,alt_text,width,height)",
+-    )
++    .select(portfolioSelect)
+     .eq("published", true)
++    .eq("show_in_gallery", true)
+     .eq("portfolio_media.is_primary", true)
+     .order("display_order", { ascending: true })
+     .order("created_at", { ascending: false });
++  if (error && placementSchemaIsPending(error)) {
++    const { data: legacyData, error: legacyError } = await supabase
++      .from("portfolio_items")
++      .select(legacyPortfolioSelect)
++      .eq("published", true)
++      .eq("portfolio_media.is_primary", true)
++      .order("display_order", { ascending: true })
++      .order("created_at", { ascending: false });
++    if (legacyError)
++      throw new Error("Published work is temporarily unavailable.");
++    return {
++      items: (legacyData ?? []).map((item) => ({
++        ...item,
++        show_in_gallery: true,
++        homepage_order: null,
++      })) as PublishedPortfolioItem[],
++      configured: true,
++    };
++  }
+   if (error) throw new Error("Published work is temporarily unavailable.");
+   return { items: (data ?? []) as PublishedPortfolioItem[], configured: true };
+ }
++
++export async function getHomepagePortfolioItems() {
++  if (!hasSupabaseEnvironment())
++    return { items: [] as PublishedPortfolioItem[], configured: false };
++  const supabase = await createClient();
++  const { data, error } = await supabase
++    .from("portfolio_items")
++    .select(portfolioSelect)
++    .eq("published", true)
++    .eq("featured", true)
++    .eq("portfolio_media.is_primary", true)
++    .order("homepage_order", { ascending: true })
++    .limit(4);
++  if (error && placementSchemaIsPending(error)) {
++    const { data: legacyData, error: legacyError } = await supabase
++      .from("portfolio_items")
++      .select(legacyPortfolioSelect)
++      .eq("published", true)
++      .eq("featured", true)
++      .eq("portfolio_media.is_primary", true)
++      .order("display_order", { ascending: true })
++      .order("created_at", { ascending: false })
++      .limit(4);
++    if (legacyError)
++      throw new Error("Featured work is temporarily unavailable.");
++    return {
++      items: (legacyData ?? []).map((item, index) => ({
++        ...item,
++        show_in_gallery: true,
++        homepage_order: index + 1,
++      })) as PublishedPortfolioItem[],
++      configured: true,
++    };
++  }
++  if (error) throw new Error("Featured work is temporarily unavailable.");
++  return { items: (data ?? []) as PublishedPortfolioItem[], configured: true };
++}
+diff --git a/next.config.ts b/next.config.ts
+index e5255b8..90eb9f4 100644
+--- a/next.config.ts
++++ b/next.config.ts
+@@ -2,6 +2,11 @@ import type { NextConfig } from "next";
+ 
+ const nextConfig: NextConfig = {
+   reactStrictMode: true,
++  experimental: {
++    serverActions: {
++      bodySizeLimit: "35mb",
++    },
++  },
+   images: {
+     remotePatterns: [
+       {
+diff --git a/tests/portfolio.test.ts b/tests/portfolio.test.ts
+index 7cc900f..5bc96c5 100644
+--- a/tests/portfolio.test.ts
++++ b/tests/portfolio.test.ts
+@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
+ import test from "node:test";
+ import {
+   buildStorageKey,
++  draftMetadataFromFilename,
+   extensionForMimeType,
+   hasValidImageSignature,
++  parseHomepageSlot,
+   publicMediaUrl,
++  resolveSurfaceVisibility,
+   validatePortfolioInput,
+ } from "../lib/portfolio";
+ 
+@@ -69,3 +72,53 @@ test("public media URLs encode path segments", () => {
+     "https://test.supabase.co/storage/v1/object/public/portfolio-media/portfolio/a%20b/image.png",
+   );
+ });
++
++test("bulk draft metadata is derived without retaining unsafe filenames", () => {
++  assert.deepEqual(draftMetadataFromFilename("raven-study_final.webp"), {
++    title: "Raven Study Final",
++    altText: "Raven Study Final portfolio image.",
++  });
++});
++
++test("homepage slots accept only the four supported positions", () => {
++  assert.equal(parseHomepageSlot(null), null);
++  assert.equal(parseHomepageSlot(""), null);
++  assert.equal(parseHomepageSlot("1"), 1);
++  assert.equal(parseHomepageSlot("4"), 4);
++  assert.throws(() => parseHomepageSlot("5"), /valid homepage slot/);
++});
++
++test("gallery and homepage placement remain independent", () => {
++  assert.deepEqual(
++    resolveSurfaceVisibility({
++      published: true,
++      showInGallery: true,
++      homepageOrder: null,
++    }),
++    { gallery: true, homepage: false },
++  );
++  assert.deepEqual(
++    resolveSurfaceVisibility({
++      published: true,
++      showInGallery: true,
++      homepageOrder: 2,
++    }),
++    { gallery: true, homepage: true },
++  );
++  assert.deepEqual(
++    resolveSurfaceVisibility({
++      published: true,
++      showInGallery: false,
++      homepageOrder: 2,
++    }),
++    { gallery: false, homepage: true },
++  );
++  assert.deepEqual(
++    resolveSurfaceVisibility({
++      published: false,
++      showInGallery: true,
++      homepageOrder: 2,
++    }),
++    { gallery: false, homepage: false },
++  );
++});
+diff --git a/tests/schema.test.ts b/tests/schema.test.ts
+index 9f0452f..4baa3cf 100644
+--- a/tests/schema.test.ts
++++ b/tests/schema.test.ts
+@@ -6,6 +6,14 @@ const migrationUrl = new URL(
+   "../supabase/migrations/202608120001_portfolio_publishing.sql",
+   import.meta.url,
+ );
++const placementMigrationUrl = new URL(
++  "../supabase/migrations/202608140001_portfolio_surface_placement.sql",
++  import.meta.url,
++);
++const consultationMigrationUrl = new URL(
++  "../supabase/migrations/202608140002_consultation_requests.sql",
++  import.meta.url,
++);
+ 
+ test("migration keeps drafts private and published media public", async () => {
+   const sql = await readFile(migrationUrl, "utf8");
+@@ -20,3 +28,44 @@ test("all portfolio mutations require the owner allowlist", async () => {
+   assert.match(sql, /create or replace function public\.is_portfolio_owner/);
+   assert.doesNotMatch(sql, /for all to authenticated using \(true\)/);
+ });
++
++test("surface placement is independent and limited to four homepage slots", async () => {
++  const sql = await readFile(placementMigrationUrl, "utf8");
++  assert.match(sql, /show_in_gallery boolean not null default true/);
++  assert.match(sql, /homepage_order between 1 and 4/);
++  assert.match(sql, /create unique index portfolio_homepage_slot/);
++  assert.match(sql, /set show_in_gallery = gallery_visible/);
++  assert.match(sql, /featured = target_homepage_order is not null/);
++});
++
++test("placement mutation remains owner-only", async () => {
++  const sql = await readFile(placementMigrationUrl, "utf8");
++  assert.match(sql, /if not public\.is_portfolio_owner\(\)/);
++  assert.match(
++    sql,
++    /grant execute on function public\.set_portfolio_placement\(uuid, boolean, smallint\) to authenticated/,
++  );
++  assert.doesNotMatch(sql, /grant execute .* to anon/);
++});
++
++test("consultation submissions use dedicated private tables and storage", async () => {
++  const sql = await readFile(consultationMigrationUrl, "utf8");
++  assert.match(sql, /create table public\.consultation_requests/);
++  assert.match(sql, /create table public\.consultation_request_media/);
++  assert.match(sql, /'consultation-intake',[\s\S]*false,[\s\S]*5242880/);
++  assert.doesNotMatch(sql, /portfolio_items[\s\S]*consultation/);
++});
++
++test("consultation intake grants no anonymous table or object access", async () => {
++  const sql = await readFile(consultationMigrationUrl, "utf8");
++  assert.match(
++    sql,
++    /revoke all on table public\.consultation_requests from anon/,
++  );
++  assert.match(
++    sql,
++    /revoke all on table public\.consultation_request_media from anon/,
++  );
++  assert.match(sql, /owner manages consultation objects/);
++  assert.doesNotMatch(sql, /consultation[\s\S]*to anon/);
++});

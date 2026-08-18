@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1800 1200" preserveAspectRatio="none">
+  <defs>
+    <filter id="broad-tone" x="-8%" y="-8%" width="116%" height="116%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency=".0028 .0045" numOctaves="3" seed="29"/>
+      <feColorMatrix values=".72 0 0 0 .18  0 .67 0 0 .14  0 0 .58 0 .08  0 0 0 .12 0"/>
+    </filter>
+    <filter id="fine-fiber" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency=".018 .31" numOctaves="2" seed="71"/>
+      <feColorMatrix values=".52 0 0 0 .24  0 .48 0 0 .20  0 0 .42 0 .14  0 0 0 .095 0"/>
+    </filter>
+  </defs>
+  <rect width="1800" height="1200" filter="url(#broad-tone)" opacity=".34"/>
+  <rect width="1800" height="1200" filter="url(#fine-fiber)" opacity=".2"/>
+</svg>

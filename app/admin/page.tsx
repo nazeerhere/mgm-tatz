@@ -1,81 +1,78 @@
 import Link from "next/link";
-import { logout } from "@/app/actions/auth";
-import { publishPortfolioItem } from "@/app/actions/portfolio";
+import { AdminNotice, AdminShell } from "@/components/admin-shell";
+import { getAdminPortfolioItems } from "@/lib/admin";
 import { requireOwner } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-export default async function AdminPage({
+export default async function AdminDashboard({
   searchParams,
 }: {
-  searchParams: Promise<{ saved?: string; published?: string; error?: string }>;
+  searchParams: Promise<{ error?: string }>;
 }) {
   const { supabase } = await requireOwner();
   const params = await searchParams;
-  const { data: items } = await supabase
-    .from("portfolio_items")
-    .select("id,title,type,published,created_at,portfolio_media(id,alt_text)")
-    .order("created_at", { ascending: false });
+  const [{ items, error: portfolioError }, faqResult] = await Promise.all([
+    getAdminPortfolioItems(supabase),
+    supabase.from("faqs").select("id", { count: "exact", head: true }),
+  ]);
+  const metrics = [
+    ["Portfolio items", items.length],
+    ["Published", items.filter((item) => item.published).length],
+    [
+      "Gallery visible",
+      items.filter((item) => item.published && item.show_in_gallery).length,
+    ],
+    [
+      "Homepage assigned",
+      items.filter((item) => item.published && item.featured).length,
+    ],
+    ["FAQ entries", faqResult.error ? "—" : (faqResult.count ?? 0)],
+  ] as const;
+
   return (
-    <section className="admin-shell">
-      <div className="admin-header">
-        <div>
-          <p className="kicker">Private studio</p>
-          <h1>Portfolio desk</h1>
-        </div>
-        <form action={logout}>
-          <button className="text-button">Sign out</button>
-        </form>
+    <AdminShell
+      eyebrow="Overview"
+      title="Dashboard"
+      description="Manage the public portfolio and studio information."
+      actions={
+        <Link className="admin-primary-action" href="/admin/portfolio/new">
+          Upload images
+        </Link>
+      }
+    >
+      <AdminNotice
+        error={
+          params.error ??
+          (portfolioError
+            ? "Portfolio data requires the latest checked-in migration."
+            : faqResult.error
+              ? "FAQ management requires the checked-in FAQ migration."
+              : undefined)
+        }
+      />
+      <div className="admin-metrics">
+        {metrics.map(([label, value]) => (
+          <article key={label}>
+            <span>{label}</span>
+            <strong>{value}</strong>
+          </article>
+        ))}
       </div>
-      {params.saved ? (
-        <p className="form-success" role="status">
-          Draft and private image saved.
-        </p>
-      ) : null}
-      {params.published ? (
-        <p className="form-success" role="status">
-          Item published to the public gallery.
-        </p>
-      ) : null}
-      {params.error ? (
-        <p className="form-error" role="alert">
-          {params.error}
-        </p>
-      ) : null}
-      <Link className="button button-dark" href="/admin/portfolio/new">
-        Add portfolio item
-      </Link>
-      <div className="admin-list">
-        <div className="admin-list-heading">
-          <h2>Portfolio items</h2>
-          <span>{items?.length ?? 0} total</span>
+      <section className="admin-panel">
+        <div className="admin-panel-heading">
+          <div>
+            <p>Shortcuts</p>
+            <h2>Quick actions</h2>
+          </div>
         </div>
-        {items?.length ? (
-          items.map((item) => (
-            <article key={item.id} className="admin-row">
-              <div>
-                <span
-                  className={`state ${item.published ? "published" : "draft"}`}
-                >
-                  {item.published ? "Published" : "Private draft"}
-                </span>
-                <h3>{item.title}</h3>
-                <p>{item.type}</p>
-              </div>
-              {!item.published ? (
-                <form action={publishPortfolioItem}>
-                  <input type="hidden" name="itemId" value={item.id} />
-                  <button className="button button-dark">Publish</button>
-                </form>
-              ) : (
-                <Link href="/work">View public →</Link>
-              )}
-            </article>
-          ))
-        ) : (
-          <p className="empty-state light">No portfolio items yet.</p>
-        )}
-      </div>
-    </section>
+        <div className="admin-quick-actions">
+          <Link href="/admin/portfolio/new">Upload images</Link>
+          <Link href="/admin/homepage">Manage homepage</Link>
+          <Link href="/admin/gallery">Manage gallery</Link>
+          <Link href="/admin/faq">Manage FAQ</Link>
+        </div>
+      </section>
+    </AdminShell>
   );
 }

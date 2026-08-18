@@ -1,5 +1,10 @@
 import type { Metadata } from "next";
+import Image from "next/image";
 import Link from "next/link";
+import { NewsletterSignup } from "@/components/newsletter-signup";
+import { RouteScrollMemory } from "@/components/route-scroll-memory";
+import { SiteNavigation } from "@/components/site-navigation";
+import { footerContactLinks } from "@/content/footer-contact";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -14,30 +19,69 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
+        <RouteScrollMemory />
         <a className="skip-link" href="#main-content">
           Skip to content
         </a>
         <header className="site-header">
           <Link className="brand-lockup" href="/">
             <span className="brand-seal" aria-hidden="true">
-              M
+              <Image
+                src="/client-media/mgm-bird-logo.jpg"
+                alt=""
+                width={256}
+                height={256}
+                priority
+                sizes="48px"
+              />
             </span>
             <span className="wordmark">MGM.TATZ</span>
           </Link>
-          <nav aria-label="Primary">
-            <Link href="/work">Work</Link>
-            <Link href="/#drawings">Drawings</Link>
-            <Link href="/#about">About</Link>
-            <Link href="/#process">Process</Link>
-            <Link href="/#faq">FAQ</Link>
-            <Link href="/#consult">Consultation</Link>
-          </nav>
+          <SiteNavigation />
         </header>
         <main id="main-content">{children}</main>
         <footer className="site-footer">
-          <span className="footer-wordmark">MGM.TATZ</span>
-          <span>Solo artist · Chicago, Illinois</span>
-          <span>Social links forthcoming</span>
+          <div
+            className="footer-newsletter"
+            aria-labelledby="footer-newsletter-heading"
+          >
+            <p className="kicker">Studio notes</p>
+            <h2 id="footer-newsletter-heading">First look, occasionally.</h2>
+            <p className="footer-newsletter-copy">
+              Promotions, availability updates, flash drops, and artist
+              news—sent only when there is something worth sharing.
+            </p>
+            <NewsletterSignup idPrefix="footer-newsletter" />
+          </div>
+
+          <div className="footer-directory">
+            <div className="footer-summary">
+              <Link className="footer-wordmark" href="/">
+                MGM.TATZ
+              </Link>
+              <p>Solo artist · Chicago, Illinois</p>
+            </div>
+            <div
+              className="footer-contact"
+              aria-labelledby="footer-contact-heading"
+            >
+              <h2 id="footer-contact-heading">Social &amp; contact</h2>
+              <ul>
+                {footerContactLinks.map((item) => (
+                  <li key={item.label}>
+                    {item.href ? (
+                      <a href={item.href}>{item.label}</a>
+                    ) : (
+                      <span aria-disabled="true">
+                        {item.label}
+                        <small>Link forthcoming</small>
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
         </footer>
       </body>
     </html>

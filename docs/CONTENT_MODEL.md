@@ -1,5 +1,39 @@
 # Client Website A — Content Model
 
+## Gallery pages
+
+Pagination is presentation state only. It creates no persisted page records and does not alter publication, Gallery membership, metadata, filter tags, or ordering fields.
+
+## Footer contact configuration
+
+Instagram, TikTok, and public contact email are optional deployment configuration, not database content. Missing values remain explicitly unavailable in the UI; no artist handle or address is inferred.
+
+## Homepage slot editing
+
+The compact admin picker is only a view over published canonical portfolio records. It creates no entity: Hero continues to use `featured`/`homepage_order`, while Drawings uses `drawing_featured`/`homepage_drawing_order`.
+
+## Homepage drawing slots
+
+Canonical `portfolio_items` rows optionally own a separate drawing placement:
+
+- `drawing_featured`: whether the item occupies a drawing slot
+- `homepage_drawing_order`: nullable slot constrained to 1–4
+
+The pair follows the existing hero placement invariant. Media remains canonical, and hero/Gallery fields remain independent.
+
+## Managed FAQ
+
+`public.faqs` owns one durable FAQ entry per row:
+
+- `id`: UUID primary key
+- `question`: 5–200 characters
+- `answer`: 5–2,000 characters
+- `display_order`: integer from 0–10,000
+- `is_active`: public visibility flag
+- `created_at`, `updated_at`: server timestamps
+
+Only active rows are publicly readable. The owner can create, edit, reorder by changing `display_order`, hide/show, and explicitly confirm deletion. Checked-in `content/site-content.ts` FAQ entries remain a temporary read fallback, not a second writable store.
+
 ## Design rules
 
 - PostgreSQL UUID primary keys and timezone-aware timestamps.
