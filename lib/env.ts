@@ -7,6 +7,10 @@ export function hasSupabaseEnvironment() {
   return requiredPublicEnvironment.every((name) => Boolean(process.env[name]));
 }
 
+export function allowsDevelopmentFallback(environment = process.env.NODE_ENV) {
+  return environment !== "production";
+}
+
 export function getSupabaseEnvironment() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const publishableKey = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;

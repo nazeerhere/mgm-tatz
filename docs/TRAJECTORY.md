@@ -537,6 +537,27 @@ Approve Phase 3 scaffolding and dependency installation, then build the smallest
 
 The work is isolated from Portfolio and SolarBot, remains documentation-only, excludes CRM/payments/general CMS scope, and creates no external resource.
 
+## 2026-08-20 — Pre-launch cleanup
+
+- Audited the release candidate across public routes, owner-only administration, data access, migrations, environment boundaries, assets, dependencies, CSS, and repository hygiene.
+- Removed only high-confidence artifacts and unreachable code: a rollback patch, a stale duplicate Home component, two unused legacy portfolio actions, an obsolete gallery query, and retired inline-placement CSS.
+- Preserved development media fallbacks because public routes intentionally use them when Supabase is unavailable; replacing them with production-only behavior remains an explicit launch decision.
+- No migration, provider, deployment, commit, or external resource changed.
+
+## 2026-08-20 — Production hardening
+
+- Added response-header hardening while retaining the inline script/style and Supabase sources required by the current Next.js runtime.
+- Added shared low-cost bot friction to both public write surfaces without introducing a misleading in-memory serverless rate limiter or a new provider.
+- Changed development content from an unconditional missing-Supabase fallback to a development-only facility; production now renders no mock managed records.
+- Recorded exact environment categories, migration comparison commands, live owner acceptance steps, and unresolved client-content inputs without applying or provisioning anything externally.
+
+## 2026-08-20 — Linked Supabase reconciliation
+
+- Confirmed the existing linked demo project is healthy and all five migration versions match locally/remotely, so no schema application was needed.
+- Verified the actual data surfaces, owner/Auth consistency, independent homepage slots, active FAQs, consultation emptiness, bucket privacy, public media availability, and anonymous read boundaries through read-only CLI/API checks.
+- Preserved all remote rows and objects. Authenticated owner CRUD and controlled consultation submission remain a human acceptance step because no owner login session was available; Mailchimp remains intentionally deferred.
+- The project owner subsequently reported the authenticated owner/admin acceptance workflows succeeded, clearing that gate for a temporary Vercel client demo.
+
 ## 2026-08-15 — Homepage paper, route memory, and gallery controls
 
 **Objective**

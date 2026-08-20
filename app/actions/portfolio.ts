@@ -102,23 +102,6 @@ function revalidatePortfolioSurfaces() {
   revalidatePath("/admin/gallery");
 }
 
-export async function createPortfolioItem(formData: FormData) {
-  const { supabase } = await requireOwner();
-  let error: string | null = null;
-  try {
-    const input = validatePortfolioInput(formData);
-    await persistPortfolioDraft(supabase, input);
-  } catch (caught) {
-    error = errorMessage(caught, "Invalid submission.");
-  }
-
-  if (error)
-    redirect(`/admin/portfolio/new?error=${encodeURIComponent(error)}`);
-  revalidatePath("/admin");
-  revalidatePath("/admin/portfolio");
-  redirect("/admin/portfolio?saved=1");
-}
-
 export async function createBulkPortfolioDraft(
   formData: FormData,
 ): Promise<BulkDraftActionResult> {
@@ -249,32 +232,6 @@ export async function updatePortfolioMetadata(formData: FormData) {
   revalidatePath("/admin");
   revalidatePath("/admin/portfolio");
   redirect("/admin/portfolio?updated=1");
-}
-
-export async function updatePortfolioPlacement(formData: FormData) {
-  const itemId = String(formData.get("itemId") ?? "");
-  let homepageOrder;
-  try {
-    homepageOrder = parseHomepageSlot(formData.get("homepageOrder"));
-  } catch (error) {
-    redirect(`/admin?error=${encodeURIComponent(errorMessage(error))}`);
-  }
-
-  const { supabase } = await requireOwner();
-  const { error } = await supabase.rpc("set_portfolio_placement", {
-    target_item_id: itemId,
-    gallery_visible: formData.get("showInGallery") === "on",
-    target_homepage_order: homepageOrder,
-  });
-  if (error)
-    redirect(
-      "/admin?error=Placement%20could%20not%20be%20updated.%20Confirm%20the%20item%20is%20published.",
-    );
-
-  revalidatePath("/");
-  revalidatePath("/work");
-  revalidatePath("/admin");
-  redirect("/admin?placement=1");
 }
 
 export async function updateHomepagePlacement(formData: FormData) {

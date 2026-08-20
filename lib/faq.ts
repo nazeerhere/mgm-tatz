@@ -1,5 +1,5 @@
 import { faqItems as fallbackFaqItems } from "@/content/site-content";
-import { hasSupabaseEnvironment } from "@/lib/env";
+import { allowsDevelopmentFallback, hasSupabaseEnvironment } from "@/lib/env";
 import { createClient } from "@/lib/supabase/server";
 
 export type FaqItem = {
@@ -36,13 +36,7 @@ export function validateFaqInput(formData: FormData) {
 }
 
 export async function getActiveFaqItems() {
-  if (!hasSupabaseEnvironment())
-    return fallbackFaqItems.map((item, index) => ({
-      id: `fallback-${index}`,
-      ...item,
-      display_order: index,
-      is_active: true,
-    }));
+  if (!hasSupabaseEnvironment()) return fallbackFaqItemsForEnvironment();
 
   const supabase = await createClient();
   const { data, error } = await supabase
@@ -52,12 +46,17 @@ export async function getActiveFaqItems() {
     .order("display_order", { ascending: true })
     .order("created_at", { ascending: true });
 
-  if (error)
-    return fallbackFaqItems.map((item, index) => ({
-      id: `fallback-${index}`,
-      ...item,
-      display_order: index,
-      is_active: true,
-    }));
+  if (error) return fallbackFaqItemsForEnvironment();
   return (data ?? []) as FaqItem[];
+}
+
+function fallbackFaqItemsForEnvironment() {
+  return allowsDevelopmentFallback()
+    ? fallbackFaqItems.map((item, index) => ({
+        id: `fallback-${index}`,
+        ...item,
+        display_order: index,
+        is_active: true,
+      }))
+    : [];
 }

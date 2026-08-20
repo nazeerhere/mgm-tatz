@@ -50,6 +50,10 @@ const newsletterComponentUrl = new URL(
   "../components/newsletter-signup.tsx",
   import.meta.url,
 );
+const heroNewsletterModalUrl = new URL(
+  "../components/hero-newsletter-modal.tsx",
+  import.meta.url,
+);
 const homepageUrl = new URL("../app/page.tsx", import.meta.url);
 
 test("migration keeps drafts private and published media public", async () => {
@@ -274,26 +278,47 @@ test("gallery filters use an accessible state-preserving disclosure", async () =
 });
 
 test("mobile navigation reuses every desktop destination and supports dismissal", async () => {
-  const navigation = await readFile(siteNavigationUrl, "utf8");
+  const [navigation, styles] = await Promise.all([
+    readFile(siteNavigationUrl, "utf8"),
+    readFile(globalStylesUrl, "utf8"),
+  ]);
   for (const destination of ["/work", "/about", "/faq", "/consultation"])
     assert.match(navigation, new RegExp(`href: "${destination}"`));
   assert.match(navigation, /aria-expanded=\{open\}/);
   assert.match(navigation, /aria-controls="mobile-navigation"/);
+  assert.match(navigation, /"Close navigation menu" : "Open navigation menu"/);
+  assert.match(navigation, /className="mobile-menu-icon"/);
+  assert.doesNotMatch(navigation, />\s*Menu\s*</);
   assert.match(navigation, /event\.key === "Escape"/);
   assert.match(navigation, /contains\(event\.target as Node\)/);
   assert.match(navigation, /onClick=\{\(\) => setOpen\(false\)\}/);
+  assert.match(styles, /\.site-header \{\s*position: sticky;\s*top: 0;/);
+  assert.match(styles, /\.mobile-menu-toggle \{[\s\S]*border-radius: 50%/);
+  assert.match(
+    styles,
+    /\.mobile-navigation:not\(\[hidden\]\) \{[\s\S]*flex-direction: column;/,
+  );
 });
 
-test("hero and footer reuse the instance-safe newsletter component", async () => {
-  const [homepage, layout, newsletter] = await Promise.all([
+test("hero modal and footer reuse the instance-safe newsletter component", async () => {
+  const [homepage, layout, newsletter, modal] = await Promise.all([
     readFile(homepageUrl, "utf8"),
     readFile(rootLayoutUrl, "utf8"),
     readFile(newsletterComponentUrl, "utf8"),
+    readFile(heroNewsletterModalUrl, "utf8"),
   ]);
-  assert.match(homepage, /className="hero-newsletter-form"/);
-  assert.match(homepage, /idPrefix="hero-newsletter"/);
-  assert.match(homepage, /label="Stay notified"/);
-  assert.doesNotMatch(homepage, /Studio notes|Occasional availability/);
+  assert.match(homepage, /<HeroNewsletterModal \/>/);
+  assert.doesNotMatch(homepage, /<NewsletterSignup|hero-newsletter-form/);
+  assert.match(modal, /<NewsletterSignup idPrefix="hero-newsletter-modal" \/>/);
+  assert.match(modal, /<dialog/);
+  assert.match(modal, /aria-modal="true"/);
+  assert.match(modal, /showModal\(\)/);
+  assert.match(modal, /onCancel=\{\(event\) =>/);
+  assert.match(modal, /event\.preventDefault\(\)/);
+  assert.match(modal, /classList\.add\("lightbox-open"\)/);
+  assert.match(modal, /triggerRef\.current\?\.focus\(\)/);
+  assert.match(modal, /event\.target === event\.currentTarget/);
+  assert.match(modal, /type="button"/);
   assert.match(layout, /idPrefix="footer-newsletter"/);
   assert.match(newsletter, /useId\(\)/);
   assert.match(newsletter, /subscribeNewsletter/);

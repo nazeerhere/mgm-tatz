@@ -1,6 +1,7 @@
 "use server";
 
 import { randomUUID } from "node:crypto";
+import { looksLikeAutomatedSubmission } from "@/lib/bot-protection";
 import {
   ConsultationConfigurationError,
   ConsultationPersistenceError,
@@ -16,7 +17,7 @@ import { createAdminClient } from "@/lib/supabase/admin";
 export async function submitConsultationRequest(
   formData: FormData,
 ): Promise<ConsultationActionState> {
-  if (String(formData.get("website") ?? "")) {
+  if (looksLikeAutomatedSubmission(formData)) {
     return {
       status: "success",
       message: "Thanks — your project details have been received.",

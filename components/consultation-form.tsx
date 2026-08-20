@@ -79,6 +79,7 @@ export function ConsultationForm() {
   const referenceInputRef = useRef<HTMLInputElement>(null);
   const bodyInputRef = useRef<HTMLInputElement>(null);
   const acknowledgementRef = useRef<HTMLInputElement>(null);
+  const startedAtRef = useRef<HTMLInputElement>(null);
   const previewUrls = useRef<string[]>([]);
   const [referencePreviews, setReferencePreviews] = useState<Preview[]>([]);
   const [bodyPreview, setBodyPreview] = useState<Preview | null>(null);
@@ -92,6 +93,10 @@ export function ConsultationForm() {
     },
     [],
   );
+
+  useEffect(() => {
+    if (startedAtRef.current) startedAtRef.current.value = String(Date.now());
+  }, []);
 
   function releasePreviews(previews: Preview[]) {
     previews.forEach((preview) => URL.revokeObjectURL(preview.url));
@@ -646,6 +651,12 @@ export function ConsultationForm() {
         Website
         <input name="website" tabIndex={-1} autoComplete="off" />
       </label>
+      <input
+        ref={startedAtRef}
+        type="hidden"
+        name="submissionStartedAt"
+        defaultValue=""
+      />
 
       <div className="consultation-submit-row">
         <button className="button" type="submit" disabled={pending}>

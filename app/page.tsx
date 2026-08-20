@@ -1,13 +1,13 @@
 import Image from "next/image";
 import Link from "next/link";
-import { NewsletterSignup } from "@/components/newsletter-signup";
+import { HeroNewsletterModal } from "@/components/hero-newsletter-modal";
 import {
   developmentDrawings,
   developmentHeroTattoos,
   milesPortrait,
 } from "@/content/development-media";
 import { aboutContent } from "@/content/site-content";
-import { getSupabaseEnvironment } from "@/lib/env";
+import { allowsDevelopmentFallback, getSupabaseEnvironment } from "@/lib/env";
 import { publicMediaUrl } from "@/lib/portfolio";
 import {
   getHomepageDrawingItems,
@@ -25,6 +25,10 @@ export default async function HomePage() {
     heroResult.configured || drawingsResult.configured
       ? getSupabaseEnvironment()
       : null;
+  const useDevelopmentFallback =
+    !heroResult.configured && allowsDevelopmentFallback();
+  const useDevelopmentDrawingFallback =
+    !drawingsResult.configured && allowsDevelopmentFallback();
   const heroItems = heroResult.configured
     ? heroResult.items.flatMap((item) => {
         const media = item.portfolio_media[0];
@@ -45,7 +49,9 @@ export default async function HomePage() {
           },
         ];
       })
-    : developmentHeroTattoos.map((item) => ({ id: item.src, ...item }));
+    : useDevelopmentFallback
+      ? developmentHeroTattoos.map((item) => ({ id: item.src, ...item }))
+      : [];
   const drawingItems = drawingsResult.configured
     ? drawingsResult.items.map((item) => ({
         id: item.id,
@@ -59,7 +65,9 @@ export default async function HomePage() {
         height: item.media.height ?? 1500,
         title: item.title,
       }))
-    : developmentDrawings.map((item) => ({ id: item.src, ...item }));
+    : useDevelopmentDrawingFallback
+      ? developmentDrawings.map((item) => ({ id: item.src, ...item }))
+      : [];
 
   return (
     <>
@@ -80,13 +88,7 @@ export default async function HomePage() {
           <p className="location-line">
             <span aria-hidden="true">◇</span> Chicago, Illinois
           </p>
-          <div className="hero-newsletter">
-            <NewsletterSignup
-              className="hero-newsletter-form"
-              idPrefix="hero-newsletter"
-              label="Stay notified"
-            />
-          </div>
+          <HeroNewsletterModal />
         </div>
         {heroItems.length ? (
           <div

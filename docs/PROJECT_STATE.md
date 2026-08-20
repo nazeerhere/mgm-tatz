@@ -106,15 +106,37 @@ Aftercare, design-to-tattoo pairing, advanced CRM automation, payment processing
 - Mailchimp is not configured, so real subscription delivery and audience membership remain unverified. Live verification requires `MAILCHIMP_API_KEY`, `MAILCHIMP_SERVER_PREFIX`, and `MAILCHIMP_AUDIENCE_ID` in server-only environment configuration.
 - The public newsletter action has no application-level rate limiter or bot challenge in this slice; provider protections and deployment-level controls must be reviewed before production traffic.
 - The public consultation action uses a honeypot and strict validation/file limits but has no durable rate limiter or bot challenge. Deployment-level abuse controls must be reviewed before production traffic.
-- The consultation migration is checked in but unapplied, and `SUPABASE_SERVICE_ROLE_KEY` is not configured locally. Live request-row creation, private image persistence, owner review access, and provider-failure cleanup remain unverified.
-- The surface-placement migration is checked in but was not applied to the development Supabase project in this pass because no connected Supabase management capability or CLI was available. Public routes retain a read-compatible legacy fallback; expanded admin controls require the migration.
+- The consultation migration is applied and the server-only service role is configured locally. The remote consultation tables and private bucket are empty; live request creation, owner review, and provider-failure cleanup remain unverified because this reconciliation pass intentionally submitted no request.
+- All five checked-in migrations match the linked demo project's remote migration history. Actual remote column probes confirm both placement models, FAQ, and consultation tables exist.
 - The client supplied a dedicated 1536×1527 circular bird source. A non-destructive 1440px square crop, reduced to a 256px development asset, now fills the existing navbar seal without changing header dimensions or replacing the MGM.TATZ wordmark.
 - The batch client, metadata edit, placement mutation, and unpublish compensation path passed static/type/unit/build checks but were not exercised with an authenticated live owner session in this pass.
 - Five additional client artwork sources (`11.jpg`–`15.jpg`) are locally available but remain outside the repository and Supabase. They were not hardcoded or copied as fallback fixtures; authenticated draft ingestion remains pending the development migration and owner session.
 
 ## Current milestone
 
-The original owner publishing path remains live-verified, and the consultation intake surface plus its private persistence migration are locally complete. The next leverage point for this slice is to review/apply `202608140002_consultation_requests.sql`, configure the service-role value server-side, then submit one synthetic request and verify its private rows/objects and owner-only retrieval before considering a Calendly handoff.
+The linked demo backend is migration-aligned and contains one matching owner, 14 intact published/gallery-visible portfolio records, four Hero placements, four Drawings placements, two active FAQs, and the three correctly classified Storage buckets. The project owner reports the authenticated owner/admin workflows have been exercised successfully. The next leverage point is Vercel demo configuration followed by deployed smoke testing.
+
+## Pre-launch repository audit — 2026-08-20
+
+- Removed the tracked rollback patch and unused duplicate `app/HomePage.tsx`; `app/page.tsx` remains the sole public Home implementation.
+- Removed two unreachable legacy portfolio actions, one superseded unpaginated gallery query, and CSS used only by the retired inline admin placement form.
+- Tracked-file secret scanning found environment names and documented placeholders only. The service-role and Mailchimp values remain server-only boundaries.
+- The five checked-in migrations remain the canonical ordered schema history. No migration or external state was changed during the audit.
+- Production launch remains gated by migration/environment reconciliation, live owner/RLS/storage checks, abuse controls for public write endpoints, and final client-approved content/contact values.
+
+## Production hardening — 2026-08-20
+
+- Application responses now declare a Next-compatible CSP, MIME sniffing protection, strict-origin referrer policy, restricted browser capabilities, frame denial, and HTTPS-only HSTS; framework disclosure is disabled.
+- Newsletter and consultation writes share honeypot and timing friction. Durable rate limiting remains a host/edge requirement because process-memory counters are not reliable on serverless infrastructure.
+- Development portfolio and FAQ fixtures are no longer eligible when `NODE_ENV=production`; missing Supabase configuration fails closed to empty managed surfaces rather than presenting mock records.
+- `docs/PRODUCTION_READINESS.md` is the canonical environment, migration reconciliation, acceptance-test, and client-content handoff checklist.
+
+## Linked Supabase reconciliation — 2026-08-20
+
+- Linked project `tpcnrgvdaysoavepptba` reports healthy. Local and remote histories match all five migrations; none was applied in this pass.
+- Read-only CLI statistics and API probes confirm the intended tables/columns, one allowlisted owner matching the sole Auth user, 14 preserved portfolio/media records, complete independent four-slot Hero/Drawings state, two active FAQs, and empty consultation tables.
+- Storage inspection confirms private `portfolio-drafts`, public `portfolio-media`, and private `consultation-intake` buckets with the intended size/type limits. A sampled published object returned 200 anonymously; no draft object existed for a direct private-object denial check.
+- Anonymous reads returned only active FAQs and published portfolio state; consultation endpoints rejected anonymous reads. Authenticated mutations were not independently rerun by the agent, but the project owner reports the owner/admin acceptance workflows succeeded.
 
 ## Gallery paging and hero signup correction — 2026-08-16
 
@@ -126,3 +148,13 @@ The original owner publishing path remains live-verified, and the consultation i
 
 - Public Gallery controls now live in a sticky, initially collapsed disclosure. Opening and closing it preserves the URL-backed type, style, sort, and page model; the expanded controls use a compact single-row treatment with contained horizontal scrolling on narrow screens.
 - The desktop primary navigation remains inline. At the existing mobile breakpoint it is replaced by a Menu disclosure containing the same four destinations, with link-selection, Escape, and outside-pointer dismissal.
+
+## Sticky mobile hamburger correction — 2026-08-20
+
+- The later mobile `position: relative` regression is removed; the canonical sticky header now remains `top: 0` with its existing page-navigation stacking level.
+- Mobile navigation uses a 46px circular, CSS-drawn three-line hamburger with state-specific accessible labels. Its dropdown is an explicit single-column list; desktop navigation remains unchanged.
+
+## Hero newsletter modal — 2026-08-20
+
+- The Hero's inline newsletter presentation is replaced by a compact secondary Subscribe trigger. The trigger opens a native modal containing the canonical shared `NewsletterSignup`; the footer instance and newsletter server action remain unchanged.
+- The modal uses native focus containment plus explicit Escape, close-button, backdrop, scroll-lock, and trigger-focus-restoration behavior.

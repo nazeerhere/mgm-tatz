@@ -7,11 +7,19 @@ import {
   subscribeToMailchimp,
   type NewsletterActionState,
 } from "@/lib/newsletter";
+import { looksLikeAutomatedSubmission } from "@/lib/bot-protection";
 
 export async function subscribeNewsletter(
   _previousState: NewsletterActionState,
   formData: FormData,
 ): Promise<NewsletterActionState> {
+  if (looksLikeAutomatedSubmission(formData)) {
+    return {
+      status: "success",
+      message: "You're on the list. Watch your inbox for MGM.TATZ updates.",
+    };
+  }
+
   try {
     const outcome = await subscribeToMailchimp(
       String(formData.get("email") ?? ""),

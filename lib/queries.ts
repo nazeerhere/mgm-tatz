@@ -40,41 +40,6 @@ function placementSchemaIsPending(error: { code?: string; message?: string }) {
   );
 }
 
-export async function getPublishedPortfolioItems() {
-  if (!hasSupabaseEnvironment())
-    return { items: [] as PublishedPortfolioItem[], configured: false };
-  const supabase = await createClient();
-  const { data, error } = await supabase
-    .from("portfolio_items")
-    .select(portfolioSelect)
-    .eq("published", true)
-    .eq("show_in_gallery", true)
-    .eq("portfolio_media.is_primary", true)
-    .order("display_order", { ascending: true })
-    .order("created_at", { ascending: false });
-  if (error && placementSchemaIsPending(error)) {
-    const { data: legacyData, error: legacyError } = await supabase
-      .from("portfolio_items")
-      .select(legacyPortfolioSelect)
-      .eq("published", true)
-      .eq("portfolio_media.is_primary", true)
-      .order("display_order", { ascending: true })
-      .order("created_at", { ascending: false });
-    if (legacyError)
-      throw new Error("Published work is temporarily unavailable.");
-    return {
-      items: (legacyData ?? []).map((item) => ({
-        ...item,
-        show_in_gallery: true,
-        homepage_order: null,
-      })) as PublishedPortfolioItem[],
-      configured: true,
-    };
-  }
-  if (error) throw new Error("Published work is temporarily unavailable.");
-  return { items: (data ?? []) as PublishedPortfolioItem[], configured: true };
-}
-
 export async function getPublishedPortfolioPage(
   filters: GalleryFilters,
   page: number,

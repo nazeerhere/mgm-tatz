@@ -12,6 +12,7 @@ import {
   paginateGalleryItems,
   parseGalleryFilters,
 } from "@/lib/gallery-filters";
+import { allowsDevelopmentFallback } from "@/lib/env";
 import { getPublishedPortfolioPage } from "@/lib/queries";
 
 export const metadata: Metadata = { title: "Work" };
@@ -29,6 +30,8 @@ export default async function WorkPage({
 }) {
   const { filters, page } = parseGalleryFilters(await searchParams);
   const result = await getPublishedPortfolioPage(filters, page);
+  const useDevelopmentFallback =
+    !result.configured && allowsDevelopmentFallback();
   const developmentItems = [...developmentTattoos, ...developmentDrawings].map(
     (item, displayOrder) => ({
       ...item,
@@ -36,7 +39,9 @@ export default async function WorkPage({
       displayOrder,
     }),
   );
-  const fallbackItems = filterAndSortGalleryItems(developmentItems, filters);
+  const fallbackItems = useDevelopmentFallback
+    ? filterAndSortGalleryItems(developmentItems, filters)
+    : [];
   const fallbackPage = paginateGalleryItems(fallbackItems, page);
   const currentPage = result.configured
     ? result.currentPage

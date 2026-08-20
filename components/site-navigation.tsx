@@ -41,11 +41,14 @@ export function SiteNavigation() {
       <button
         className="mobile-menu-toggle"
         type="button"
+        aria-label={open ? "Close navigation menu" : "Open navigation menu"}
         aria-expanded={open}
         aria-controls="mobile-navigation"
         onClick={() => setOpen((current) => !current)}
       >
-        Menu <span aria-hidden="true">{open ? "▴" : "▾"}</span>
+        <span className="mobile-menu-icon" aria-hidden="true">
+          <span />
+        </span>
       </button>
       <nav
         className="mobile-navigation"

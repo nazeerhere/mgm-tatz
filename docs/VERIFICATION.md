@@ -239,6 +239,47 @@ This is successful end-to-end evidence for the user-visible development publishi
 - The mobile production capture at the established exact-width emulation shows only the MGM.TATZ brand and Menu control in the header, plus a separate collapsed Filters row. No clipped page-level content or horizontal displacement is visible.
 - Static interaction coverage confirms both disclosures expose `aria-expanded`/`aria-controls`; mobile navigation retains all four destinations and implements link-selection, Escape, and outside-pointer dismissal. Filter disclosure state does not reset or rewrite filter selections.
 
+## Sticky mobile hamburger correction — 2026-08-20
+
+- Final format, zero-warning lint, strict typecheck, all 49 tests, production build, and `git diff --check` pass.
+- Mobile production captures inspected Home, `/work`, `/faq`, and `/consultation`: each shows the brand plus centered three-line circular hamburger with no inline desktop links or horizontal displacement.
+- A fragment-scrolled `/work` capture keeps the navbar visible above the sticky Filters row; the header/filter stack remains 50/30 and the dropdown remains inside the header's higher stacking context.
+- The 1440×1000 capture retains the four existing inline desktop destinations and contains no hamburger.
+
+## Hero newsletter modal — 2026-08-20
+
+- Final format, zero-warning lint, strict typecheck, all 49 tests, production build, and `git diff --check` pass.
+- Browser instrumentation at exact 375×812 CSS pixels reports zero horizontal overflow, one Subscribe trigger, one shared form in the open dialog, focus on the dialog close control, active body scroll lock, and a centered `345 × 383.88px` rendered dialog with 15px side margins.
+- Native Escape, the explicit close control, and simulated backdrop activation each close the dialog; Escape and close paths remove scroll lock and return focus to Subscribe. No newsletter form was submitted.
+- Open-state desktop and mobile captures show a compact centered dark panel, restrained backdrop, visible close control, and naturally responsive shared form. Footer markup and its `footer-newsletter` instance were not changed.
+
+## Pre-launch repository audit — 2026-08-20
+
+- Inspected tracked/untracked files, imports and server-action references, public/admin routes, environment boundaries, RLS migrations, Storage policies, provider integrations, CSS overrides, ignored build artifacts, and the final Git diff.
+- `npm ls --all` completed successfully; platform-specific optional dependencies were absent as expected and three Sharp WASM support packages were reported as extraneous in the local install. No manifest or lockfile mutation was made.
+- `npm audit --omit=dev` queried the registry and reported zero known production dependency vulnerabilities.
+- Tracked secret-pattern inspection found only documented environment-variable names and placeholder/test values. `.env.local`, build output, logs, captures, and TypeScript build metadata remain ignored and untracked.
+- External database state, live owner workflows, real Mailchimp delivery, and consultation persistence were not mutated or claimed by this review.
+
+## Production hardening — 2026-08-20
+
+- Unit coverage verifies honeypot detection, minimum completion time, progressive-submission compatibility, production fallback denial, and the declared header baseline.
+- Production response inspection must confirm the built server emits the configured CSP, HSTS, referrer, permissions, frame, and MIME headers without `X-Powered-By`.
+- No provider form was submitted, no remote migration was inspected or applied, and no environment secret was printed or changed.
+
+## Linked Supabase reconciliation — 2026-08-20
+
+- `npx --yes supabase@latest migration list --linked` returned five matching local/remote versions: `202608120001`, `202608140001`, `202608140002`, `202608160001`, and `202608160003`.
+- The linked project is active/healthy. Read-only table statistics observed 14 portfolio items, 14 media rows, 9 style tags, 2 FAQs, 1 owner row, and zero consultation/request-media rows.
+- Explicit zero-row column probes succeeded for every intended portfolio, FAQ, owner, and consultation field. The owner row matches `OWNER_USER_ID`, the matching Auth user exists, and there is only one owner/Auth user in this demo project.
+- A read-only anonymous GET to `is_portfolio_owner()` returned 200/false, confirming the canonical predicate exists and does not grant anonymous ownership.
+- Placement reads observed Hero slots `[1,2,3,4]` and Drawings slots `[1,2,3,4]`. All 14 portfolio rows are published and gallery-visible.
+- Bucket inspection observed private drafts (10 MiB images), public portfolio media (10 MiB images), and private consultation intake (5 MiB images). Anonymous access to a sampled published object returned 200. No draft or consultation object existed for direct private-object download denial.
+- Anonymous REST checks observed two active FAQs, zero inactive FAQ visibility, zero unpublished portfolio visibility, and 401 responses for both consultation tables.
+- The Docker-dependent `db dump` command could not run because Docker is unavailable. Applied migration parity, table statistics, explicit column probes, bucket inspection, and anonymous behavior were used instead; raw remote policy definitions were not dumped.
+- The configured production build rendered four Hero and four Drawings placements, Gallery pages of 6/6/2 records, two FAQ disclosures, and anonymous redirects for every admin route. No form was submitted and no remote row/object was mutated.
+- After reconciliation, the project owner reported successful manual exercise of the authenticated owner/admin workflows. This is owner-reported acceptance evidence rather than an agent-observed credentialed session.
+
 ## Bounded paper, route-memory, gallery-control patch — 2026-08-15
 
 - `npm run format:check`, zero-warning `npm run lint`, strict `npm run typecheck`, all 29 tests, `npm run build`, and `git diff --check` pass on the final tree.
